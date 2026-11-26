@@ -88,8 +88,10 @@ router.post("/capture", async (req, res) => {
       .catch((err) => { console.warn("Inspect Buddy: watcher capture failed", err); });
 
     const buddy = await buddyReady();
-    if (!buddy.clientConfig().enabled) { res.json(EMPTY_CAPTURE); return; }
+    // Pace every capture per session, whether or not AI Buddy is on — the
+    // watcher forwarding above rides on the same request and must stay paced.
     if (paced(lastCapture, s.id, 2000)) { res.status(429).json({ error: "Screens are being read too often." }); return; }
+    if (!buddy.clientConfig().enabled) { res.json(EMPTY_CAPTURE); return; }
     res.json(buddy.capture(meta(s), textOf(req)));
   } catch (err) { sendError(res, err); }
 });
