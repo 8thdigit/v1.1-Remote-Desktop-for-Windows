@@ -463,11 +463,19 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
   // Add (or merge) a question captured from one screen. Duplicate detection is
   // similarity-based so a flashing/paging exam screen doesn't produce the same
   // question twice; later frames of the current question update it in place.
+  // The merged-into question may be anywhere in the list (a pager that shows
+  // an earlier question again), not only the newest one.
   function addQuestion(w: WatcherWatch, body: string, options: string[], image?: string, shotId?: string) {
-    const recent = w.questions.slice(-4);
-    const dupRecent = recent.some((q) => simWords(q.text, body) >= 0.85);
+    const cap = Math.min(MAX_QUESTIONS, settings.maxQuestions);
+    const linkShot = (n: number) => { if (shotId) { const s = w.shots.find((x) => x.id === shotId); if (s) s.questionIndex = n; } };
+
+    // Exact duplicate check across the whole list first (cheap, catches a
+    // re-shown screen verbatim), then a similarity check against the most
+    // recent questions (partial OCR / scrolling variants).
+    const exact = w.questions.find((q) => q.text === body);
+    const dupRecent = exact ?? w.questions.slice(-6).find((q) => simWords(q.text, body) >= 0.85);
     if (!dupRecent && simWords(w.lastSeen, body) < 0.85
-      && w.questions.length < Math.min(MAX_QUESTIONS, settings.maxQuestions)
+      && w.questions.length < cap
       && (body.length >= 12 || options.length > 0)) {
       const q: WatcherQuestion = {
         n: w.questions.length + 1, at: clock(), text: body.slice(0, MAX_TEXT), image,
@@ -476,18 +484,19 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       };
       w.questions.push(q);
       w.lastSeen = body;
-      if (shotId) { const s = w.shots.find((x) => x.id === shotId); if (s) s.questionIndex = q.n; }
+      linkShot(q.n);
       void researchOne(w, q).then(() => persistSoon()).catch(() => { q.status = "pending"; });
       return q;
     }
+
     // Same question seen again: refresh its screenshot and grow the text when
     // the new frame reads more of it (scrolling / partial OCR).
-    const cur = w.questions.at(-1);
-    if (cur && simWords(cur.text, body) >= 0.6) {
+    const cur = dupRecent ?? w.questions.at(-1);
+    if (cur && (dupRecent || simWords(cur.text, body) >= 0.6)) {
       if (image) cur.image = image;
       if (body.length > cur.text.length * 1.15) cur.text = body.slice(0, MAX_TEXT);
       if (options.length > (cur.options?.length ?? 0)) cur.options = options.slice(0, 8);
-      if (shotId) { const s = w.shots.find((x) => x.id === shotId); if (s) s.questionIndex = cur.n; }
+      linkShot(cur.n);
       return null;
     }
     return null;

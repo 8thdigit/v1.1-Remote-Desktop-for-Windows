@@ -577,7 +577,10 @@ router.post("/buddy/watchers/:id", async (req, res) => {
     // watcherReady() resolves even when the state store failed to open (it
     // falls back to an in-memory engine), so this can never hang the UI.
     const engine = await watcherReady();
-    const live = store.overview().live.find((s) => s.id === req.params.id && s.state === "live");
+    // Any ongoing session (not just state === "live") — the control room
+    // counts every session that has left "waiting", and captures can arrive
+    // while a second viewer is still joining.
+    const live = store.overview().live.find((s) => s.id === req.params.id && s.state !== "waiting");
     const accounts = await accountsReady();
     const ra = live?.ra ?? "";
     const meta = {
