@@ -2,6 +2,13 @@ import { Router, type Request, type Response } from "express";
 import type { Session } from "../lib/msfwr";
 import { buddyReady, sendError, store, watcherReady } from "../lib/portal";
 
+// Screenshots must reach the Inspect Buddy question watcher even when the
+// AI Buddy master switch is off in the relay settings: the helper's panel is
+// already open and taking shots on the remote desktop, so /capture answers
+// with a neutral empty result and forwards text + image to the watcher.
+// (The engine still ignores sessions whose per-session watcher is disabled.)
+const EMPTY_CAPTURE = { issues: [] as string[], matches: [] as { id: string }[] };
+
 // AI Buddy endpoints for the helper's viewer. They use the viewer's session
 // token (the same one that reads the screen), so only someone already
 // connected to a live session can send its screen text or ask for help.
@@ -66,20 +73,23 @@ router.post("/capture", async (req, res) => {
   const s = viewer(req, res);
   if (!s) return;
   try {
-    const buddy = await buddyReady();
-    if (!buddy.clientConfig().enabled) { res.status(403).json({ error: "AI Buddy is turned off." }); return; }
-    if (paced(lastCapture, s.id, 2000)) { res.status(429).json({ error: "Screens are being read too often." }); return; }
-    // Inspect Buddy: forward the same settled screen (and optional screenshot)
-    // to the question watcher engine. Fire-and-forget so the helper's capture
-    // response never waits on watcher work. Do NOT gate this on the buddy
-    // master settings switch here: a per-session watcher that an operator
-    // started must keep receiving screens even if the global toggle is later
-    // flipped off mid-session, and the engine already ignores sessions whose
-    // watcher is disabled. Errors are logged, not swallowed, so a broken
-    // watcher store can't silently freeze detection in "watching".
+    // Inspect Buddy: forward the settled screen (and its screenshot) to the
+    // question watcher engine FIRST and unconditionally — before the AI Buddy
+    // master switch check. This is what fixes "screenshots are taken in the
+    // AI buddy side bar but the question watcher never picks them up": when
+    // AI Buddy was turned off globally the route answered 403 and the images
+    // never reached the watcher at all. Fire-and-forget so the helper's
+    // capture response never waits on watcher work. The engine itself still
+    // ignores sessions whose per-session watcher is disabled. Errors are
+    // logged, not swallowed, so a broken watcher store can't silently freeze
+    // detection in "watching".
     void watcherReady()
       .then(async (w) => { await w.capture(s.id, meta(s), textOf(req), imageOf(req)); })
       .catch((err) => { console.warn("Inspect Buddy: watcher capture failed", err); });
+
+    const buddy = await buddyReady();
+    if (!buddy.clientConfig().enabled) { res.json(EMPTY_CAPTURE); return; }
+    if (paced(lastCapture, s.id, 2000)) { res.status(429).json({ error: "Screens are being read too often." }); return; }
     res.json(buddy.capture(meta(s), textOf(req)));
   } catch (err) { sendError(res, err); }
 });

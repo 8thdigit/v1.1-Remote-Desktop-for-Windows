@@ -371,6 +371,21 @@ function WatcherDetail({ sessionId, onClose, onError }: { sessionId: string; onC
   // this is exactly what the operator wants to see — the live screen flow.
   const shots = [...(data?.shots ?? [])].sort((a, b) => b.at - a.at);
 
+  // Auto-analysis: as soon as screenshots arrive under the session, every
+  // un-analysed one is turned into a numbered question and its answer
+  // research starts — no need to press "Analyse" or "Start capturing" for
+  // each screen. Duplicate screens merge into the existing question
+  // server-side, so re-sending a settled screen never doubles up. Only one
+  // shot is sent at a time (busyShot keeps the others waiting for the next
+  // poll), and completed watches are left untouched.
+  useEffect(() => {
+    if (!data || data.status === 'completed' || busyShot) return;
+    const pending = [...(data.shots ?? [])].sort((a, b) => a.at - b.at).find((s) => s.questionIndex == null && (s.text || s.imageUrl));
+    if (!pending) return;
+    void analyseShot(pending.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, busyShot]);
+
   async function forceExam() {
     setBusy(-1); setMsg(null);
     try {

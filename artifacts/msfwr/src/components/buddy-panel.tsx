@@ -174,6 +174,15 @@ export function BuddyPanel({ token, frame, config }: { token: string; frame?: st
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
       const full = blob ? URL.createObjectURL(blob) : thumb.toDataURL('image/jpeg', 0.6);
       setCaptures((list) => {
+        // Duplicate guard: a settled screen whose OCR text matches the newest
+        // capture verbatim is only refreshed in place (new screenshot/time),
+        // never added twice to the strip — same rule the watcher applies on
+        // the server so the question list stays clean.
+        if (list.length && list[0].text.trim() === text.trim()) {
+          const [head, ...rest] = list;
+          if (full !== head.full && head.full.startsWith('blob:')) URL.revokeObjectURL(head.full);
+          return [{ ...head, at: Date.now(), thumb: thumb.toDataURL('image/jpeg', 0.6), full, issues: res.issues }, ...rest];
+        }
         const next = [{ at: Date.now(), thumb: thumb.toDataURL('image/jpeg', 0.6), full, text, issues: res.issues }, ...list];
         for (const dropped of next.slice(MAX_KEPT)) if (dropped.full.startsWith('blob:')) URL.revokeObjectURL(dropped.full);
         return next.slice(0, MAX_KEPT);
