@@ -72,8 +72,8 @@ test("set up a live session with the buddy master switch on", async () => {
   viewer = { authorization: `Bearer ${accepted.json.token}` };
   sessionId = (await admin("GET", "/admin/overview")).json.live[0].id;
   // The watcher engine keeps its OWN settings store (separate from the AI
-  // Buddy settings above): PATCH /admin/inspect/settings. Turn both on.
-  const on = await admin("PATCH", "/admin/inspect/settings", { enabled: true });
+  // Buddy settings above): PATCH /admin/buddy/inspect/settings. Turn both on.
+  const on = await admin("PATCH", "/admin/buddy/inspect/settings", { enabled: true });
   assert.equal(on.status, 200, JSON.stringify(on.json));
   assert.equal(on.json.enabled, true);
 });

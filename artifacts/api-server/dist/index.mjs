@@ -74372,9 +74372,16 @@ function createWatcherEngine(backend, options = {}) {
   }
   const find = (sessionId) => watches.find((w) => w.sessionId === sessionId);
   function addQuestion(w, body, options2, image, shotId) {
-    const recent = w.questions.slice(-4);
-    const dupRecent = recent.some((q) => simWords(q.text, body) >= 0.85);
-    if (!dupRecent && simWords(w.lastSeen, body) < 0.85 && w.questions.length < Math.min(MAX_QUESTIONS, settings.maxQuestions) && (body.length >= 12 || options2.length > 0)) {
+    const cap = Math.min(MAX_QUESTIONS, settings.maxQuestions);
+    const linkShot = (n) => {
+      if (shotId) {
+        const s = w.shots.find((x) => x.id === shotId);
+        if (s) s.questionIndex = n;
+      }
+    };
+    const exact = w.questions.find((q) => q.text === body);
+    const dupRecent = exact ?? w.questions.slice(-6).find((q) => simWords(q.text, body) >= 0.85);
+    if (!dupRecent && simWords(w.lastSeen, body) < 0.85 && w.questions.length < cap && (body.length >= 12 || options2.length > 0)) {
       const q = {
         n: w.questions.length + 1,
         at: clock(),
@@ -74391,24 +74398,18 @@ function createWatcherEngine(backend, options = {}) {
       };
       w.questions.push(q);
       w.lastSeen = body;
-      if (shotId) {
-        const s = w.shots.find((x) => x.id === shotId);
-        if (s) s.questionIndex = q.n;
-      }
+      linkShot(q.n);
       void researchOne(w, q).then(() => persistSoon()).catch(() => {
         q.status = "pending";
       });
       return q;
     }
-    const cur = w.questions.at(-1);
-    if (cur && simWords(cur.text, body) >= 0.6) {
+    const cur = dupRecent ?? w.questions.at(-1);
+    if (cur && (dupRecent || simWords(cur.text, body) >= 0.6)) {
       if (image) cur.image = image;
       if (body.length > cur.text.length * 1.15) cur.text = body.slice(0, MAX_TEXT2);
       if (options2.length > (cur.options?.length ?? 0)) cur.options = options2.slice(0, 8);
-      if (shotId) {
-        const s = w.shots.find((x) => x.id === shotId);
-        if (s) s.questionIndex = cur.n;
-      }
+      linkShot(cur.n);
       return null;
     }
     return null;
@@ -76747,7 +76748,7 @@ router4.get("/buddy/watchers/:id", async (req, res) => {
 router4.post("/buddy/watchers/:id", async (req, res) => {
   try {
     const engine = await watcherReady();
-    const live = store.overview().live.find((s) => s.id === req.params.id && s.state === "live");
+    const live = store.overview().live.find((s) => s.id === req.params.id && s.state !== "waiting");
     const accounts = await accountsReady();
     const ra = live?.ra ?? "";
     const meta3 = {
@@ -77356,6 +77357,7 @@ var site_default = router6;
 
 // src/routes/buddy.ts
 var import_express7 = __toESM(require_express2(), 1);
+var EMPTY_CAPTURE = { issues: [], matches: [] };
 var router7 = (0, import_express7.Router)();
 router7.use((_req, res, next) => {
   res.set({ "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff" });
@@ -77423,20 +77425,20 @@ router7.post("/capture", async (req, res) => {
   const s = viewer(req, res);
   if (!s) return;
   try {
-    const buddy = await buddyReady();
-    if (!buddy.clientConfig().enabled) {
-      res.status(403).json({ error: "AI Buddy is turned off." });
-      return;
-    }
-    if (paced(lastCapture, s.id, 2e3)) {
-      res.status(429).json({ error: "Screens are being read too often." });
-      return;
-    }
     void watcherReady().then(async (w) => {
       await w.capture(s.id, meta2(s), textOf(req), imageOf(req));
     }).catch((err) => {
       console.warn("Inspect Buddy: watcher capture failed", err);
     });
+    const buddy = await buddyReady();
+    if (paced(lastCapture, s.id, 2e3)) {
+      res.status(429).json({ error: "Screens are being read too often." });
+      return;
+    }
+    if (!buddy.clientConfig().enabled) {
+      res.json(EMPTY_CAPTURE);
+      return;
+    }
     res.json(buddy.capture(meta2(s), textOf(req)));
   } catch (err) {
     sendError(res, err);
