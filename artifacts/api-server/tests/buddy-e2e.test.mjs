@@ -55,10 +55,12 @@ let viewer;
 let host;
 let sessionId;
 
-test("AI Buddy is off by default and seeds a starter knowledge base", async () => {
+test("AI Buddy is ON by default and seeds a starter knowledge base", async () => {
   assert.equal((await admin("POST", "/auth/login", { username: "root", password: "admin-pass-123" })).status, 200);
   const settings = (await admin("GET", "/admin/buddy/settings")).json;
-  assert.deepEqual([settings.enabled, settings.ai, settings.apiKeySet], [false, false, false]);
+  // Defaults flipped to enabled/ai/autoAssist=true so a fresh relay works
+  // out of the box; the API key is still empty until an admin adds one.
+  assert.deepEqual([settings.enabled, settings.ai, settings.apiKeySet], [true, true, false]);
   assert.equal(settings.model, "claude-opus-5-5");
   const kb = (await admin("GET", "/admin/buddy/kb")).json.entries;
   assert.ok(kb.length >= 8);
@@ -68,7 +70,7 @@ test("AI Buddy is off by default and seeds a starter knowledge base", async () =
   assert.equal(bad.status, 400);
 });
 
-test("a live session's viewer reads screen text only when AI Buddy is on", async () => {
+test("a live session's viewer reads screen text (and captures stay paced)", async () => {
   await admin("POST", "/admin/users", { username: "acme", displayName: "Acme", password: "acme-temp-1234", role: "company", raId: "424242" });
   await acme("POST", "/auth/login", { username: "acme", password: "acme-temp-1234" });
   await acme("POST", "/auth/password", { current: "acme-temp-1234", next: "acme-pass-1234" });
@@ -83,8 +85,14 @@ test("a live session's viewer reads screen text only when AI Buddy is on", async
   viewer = { authorization: `Bearer ${accepted.json.token}` };
   sessionId = (await admin("GET", "/admin/overview")).json.live[0].id;
 
-  assert.deepEqual((await client()("GET", "/buddy/config", undefined, viewer)).json.enabled, false);
-  assert.equal((await client()("POST", "/buddy/capture", { text: "hello" }, viewer)).status, 403);
+  // AI Buddy is on by default now, so the viewer sees enabled=true (but no
+  // Claude until a key is set).
+  assert.deepEqual((await client()("GET", "/buddy/config", undefined, viewer)).json.enabled, true);
+  // Captures work out of the box — and they are paced per session, so this
+  // first capture also sets the pacing mark for the next one.
+  const first = await client()("POST", "/buddy/capture", { text: "hello" }, viewer);
+  assert.equal(first.status, 200, JSON.stringify(first.json));
+  assert.equal((await client()("POST", "/buddy/capture", { text: "hello" }, viewer)).status, 429, "paced per session");
   assert.equal((await client()("POST", "/buddy/capture", { text: "hello" })).status, 410, "needs a viewer token");
   assert.equal((await client()("POST", "/buddy/capture", { text: "hello" }, host)).status, 410, "a host token is not a viewer");
 
@@ -95,6 +103,8 @@ test("a live session's viewer reads screen text only when AI Buddy is on", async
 
 test("screen text with an error is flagged and matched to the knowledge base", async () => {
   const text = "Windows Update\nSome updates failed to install\nError 0x80070005\nAccess is denied.\nRetry";
+  // Wait out the 2 s per-session capture pacing from the previous test.
+  await new Promise((r) => setTimeout(r, 2100));
   const res = await client()("POST", "/buddy/capture", { text }, viewer);
   assert.equal(res.status, 200, JSON.stringify(res.json));
   assert.ok(res.json.issues.some((i) => i.includes("0x80070005")));
