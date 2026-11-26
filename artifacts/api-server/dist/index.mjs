@@ -73501,9 +73501,9 @@ var MAX_ISSUES = 40;
 var MAX_KB = 1e3;
 var DEFAULT_MODEL = "claude-opus-5-5";
 var DEFAULT_BUDDY_SETTINGS = {
-  enabled: false,
-  ai: false,
-  autoAssist: false,
+  enabled: true,
+  ai: true,
+  autoAssist: true,
   model: DEFAULT_MODEL,
   captureSeconds: 8,
   updatedAt: 0
@@ -74073,8 +74073,8 @@ var MAX_DOCS = 500;
 var MAX_DOC_BYTES = 8 * 1024 * 1024;
 var DEFAULT_MODEL2 = "claude-opus-5-5";
 var DEFAULT_WATCHER_SETTINGS = {
-  enabled: false,
-  ai: false,
+  enabled: true,
+  ai: true,
   webSearch: true,
   model: DEFAULT_MODEL2,
   maxQuestions: 60,
@@ -74594,7 +74594,7 @@ ${q.options.map((o) => `- ${o}`).join("\n")}` : ""}`)
     async capture(sessionId, meta3 = {}, rawText, image) {
       let w = find(sessionId);
       if (!w && settings.enabled) {
-        w = { sessionId, pcName: meta3.pcName ?? "", raId: meta3.raId ?? "", operator: meta3.operator ?? "", enabled: false, startedAt: clock(), phase: "idle", examTitle: "", questions: [], shots: [], lastSeen: "", notes: "", updatedAt: clock() };
+        w = { sessionId, pcName: meta3.pcName ?? "", raId: meta3.raId ?? "", operator: meta3.operator ?? "", enabled: true, startedAt: clock(), phase: "watching", examTitle: "", questions: [], shots: [], lastSeen: "", notes: "", updatedAt: clock() };
         watches.unshift(w);
         if (watches.length > MAX_WATCHES) watches.length = MAX_WATCHES;
       }

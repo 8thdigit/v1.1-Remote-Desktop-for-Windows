@@ -59,7 +59,8 @@ export type KbEntry = {
 };
 
 export type BuddySettings = {
-  // Off by default: an admin turns AI Buddy on for every helper's viewer.
+  // On by default so a fresh relay works out of the box; an admin can still
+  // turn AI Buddy off for every helper's viewer in Settings.
   enabled: boolean;
   // Ask Claude for troubleshooting steps and summaries.
   ai: boolean;
@@ -100,10 +101,16 @@ const MAX_ISSUES = 40;
 const MAX_KB = 1000;
 export const DEFAULT_MODEL = "claude-opus-5-5";
 
+// AI Buddy ships ON so a freshly deployed relay works out of the box: the
+// helper's side bar reads screens and the knowledge base matches immediately.
+// AI features stay gated on an API key (aiReady() requires one), so enabling
+// these flags without a key is harmless — the panel just skips Claude calls.
+// An admin can still turn everything off in Settings; only the stored value
+// overrides these defaults.
 export const DEFAULT_BUDDY_SETTINGS: BuddySettings = {
-  enabled: false,
-  ai: false,
-  autoAssist: false,
+  enabled: true,
+  ai: true,
+  autoAssist: true,
   model: DEFAULT_MODEL,
   captureSeconds: 8,
   updatedAt: 0,

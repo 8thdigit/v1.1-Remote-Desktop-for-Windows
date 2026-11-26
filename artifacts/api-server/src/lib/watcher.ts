@@ -115,8 +115,12 @@ const MAX_DOCS = 500;
 const MAX_DOC_BYTES = 8 * 1024 * 1024;
 export const DEFAULT_MODEL = "claude-opus-5-5";
 
+// Inspect Buddy ships ON as well: with both master switches on by default,
+// screenshots taken in the AI Buddy side bar reach the question watcher and
+// start producing questions without any admin setup. AI answer research is
+// still gated on a configured key (aiReady()), and admins can turn it off.
 export const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
-  enabled: false, ai: false, webSearch: true, model: DEFAULT_MODEL, maxQuestions: 60, updatedAt: 0,
+  enabled: true, ai: true, webSearch: true, model: DEFAULT_MODEL, maxQuestions: 60, updatedAt: 0,
 };
 
 // --- Backends ---
@@ -679,7 +683,12 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       let w = find(sessionId);
       if (!w && settings.enabled) {
         // The engine knows a live session that has no watcher record yet.
-        w = { sessionId, pcName: meta.pcName ?? "", raId: meta.raId ?? "", operator: meta.operator ?? "", enabled: false, startedAt: clock(), phase: "idle", examTitle: "", questions: [], shots: [], lastSeen: "", notes: "", updatedAt: clock() };
+        // Start it in "watching" mode (not merely idle): with Inspect Buddy
+        // on by default, every live remote session is monitored out of the
+        // box — screens land in the strip, and once an exam is detected
+        // (heuristics or AI) questions flow automatically. Admins can still
+        // stop a single session with DELETE /watchers/:id.
+        w = { sessionId, pcName: meta.pcName ?? "", raId: meta.raId ?? "", operator: meta.operator ?? "", enabled: true, startedAt: clock(), phase: "watching", examTitle: "", questions: [], shots: [], lastSeen: "", notes: "", updatedAt: clock() };
         watches.unshift(w);
         if (watches.length > MAX_WATCHES) watches.length = MAX_WATCHES;
       }
