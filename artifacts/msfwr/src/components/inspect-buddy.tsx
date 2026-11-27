@@ -42,15 +42,29 @@ export type WatcherStatus = 'off' | 'watching' | 'exam-detected' | 'completed';
 // One settled screenshot forwarded by the AI Buddy panel (left pane of the
 // watcher detail). questionIndex is set once it has been analysed into a
 // numbered question (or merged into an existing one — duplicates are
-// prevented server-side by text similarity).
+// prevented server-side by text similarity). Only the newest liveShots stay
+// on-screen; older ones move to the Archive tab. ignored screens drop out of
+// both lists until restored. pipeline tracks the two-stage Claude flow
+// (queued → extracting → extracted → answering → answered / failed) shown in
+// the middle column.
+export type ShotStage = 'queued' | 'extracting' | 'extracted' | 'answering' | 'answered' | 'failed';
+
+export type ShotPipeline = {
+  stage: ShotStage; at?: number; model?: string; answerModel?: string;
+  error?: string; tokensIn?: number; tokensOut?: number;
+};
+
 export type WatcherShot = {
   id: string; at: number; imageUrl: string | null; text: string; questionIndex: number | null;
+  ignored?: boolean; pipeline?: ShotPipeline | null;
 };
 
 export type WatcherView = {
   sessionId: string; enabled: boolean; status: WatcherStatus; startedAt: number | null;
   completedAt: number | null; questions: WatcherQuestion[]; documentsStored: string[]; error: string | null;
   lastSeenText?: string; shots?: WatcherShot[]; examTitle?: string; notes?: string;
+  // How many of the newest screenshots stay on-screen (rest → Archive tab).
+  liveShots?: number;
 };
 
 export type RepoDoc = {
