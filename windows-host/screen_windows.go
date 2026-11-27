@@ -5,6 +5,7 @@ import (
 	"errors"
 	"image"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"msfwr.local/host/jpeg444"
@@ -48,16 +49,53 @@ func stopPressed() bool {
 	return (keyDown(0x11) && keyDown(0x32)) || keyDown(0x7b)
 }
 
-func onDefaultDesktop() bool {
+func inputDesktopName() string {
 	d, _, _ := openDesktop.Call(0, 0, 1)
 	if d == 0 {
-		return false
+		return ""
 	}
 	defer closeDesktop.Call(d)
 	var buf [128]uint16
 	var size uint32
 	ok, _, _ := getObjectInfo.Call(d, 2, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)*2), uintptr(unsafe.Pointer(&size)))
-	return ok != 0 && syscall.UTF16ToString(buf[:]) == "Default"
+	if ok == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buf[:])
+}
+
+// onDefaultDesktop reports whether the desktop receiving keyboard and mouse
+// input right now is the normal user desktop. Exam lockdown browsers (e.g.
+// Pearson VUE / Respondus) switch input to a separate secure desktop, which
+// stops screen sharing; see secureDesktopGrace for how long we tolerate that.
+func onDefaultDesktop() bool {
+	return inputDesktopName() == "Default"
+}
+
+// secureDesktopGrace is how long the shared screen may keep streaming while
+// input sits on a protected/secure desktop. Some lockdown apps flip input to
+// their secure desktop only briefly at launch (or during prompts); ending the
+// session instantly made those look like crashes. After this window the
+// session still ends, because capturing and injecting into a secure desktop
+// from a normal process is not possible in Windows.
+const secureDesktopGrace = 30 * time.Second
+
+var nonDefaultSince time.Time
+
+// desktopAllowed reports whether it is fine to keep streaming right now. The
+// first time input leaves the Default desktop it starts a grace window: the
+// screen keeps updating (the Default desktop stays composed behind the
+// overlay) so brief switches do not drop the connection. If input stays away
+// past the window, streaming stops.
+func desktopAllowed() bool {
+	if onDefaultDesktop() {
+		nonDefaultSince = time.Time{}
+		return true
+	}
+	if nonDefaultSince.IsZero() {
+		nonDefaultSince = time.Now()
+	}
+	return time.Since(nonDefaultSince) < secureDesktopGrace
 }
 
 func metric(which uintptr) int {

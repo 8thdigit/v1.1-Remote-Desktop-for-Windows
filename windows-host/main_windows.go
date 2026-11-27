@@ -403,7 +403,10 @@ func stream(ctx context.Context, r *relay) error {
 		if ctx.Err() != nil {
 			return fail(ctx.Err())
 		}
-		if !onDefaultDesktop() || !sameScreen(w, h) {
+		if !desktopAllowed() {
+			return errors.New("Windows switched to a locked or protected desktop")
+		}
+		if !sameScreen(w, h) {
 			return errors.New("Windows desktop or display configuration changed")
 		}
 		// Older relays ignore frames closer than 100 ms apart.
