@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import Anthropic from "@anthropic-ai/sdk";
@@ -39,6 +39,12 @@ export type WatcherQuestion = {
   confidence: number;        // 0..1
   correctedBy: string;       // admin who accepted/corrected
   formatId?: string;         // exam-format profile matched from the format DB
+  // Two-stage AI extraction result (quiz_tool.py schema), retained so the Q&A
+  // keeps its structure: question number/type + labelled options.
+  questionNumber?: number;
+  questionType?: string;     // single_choice | multiple_choice_multi_select | true_false | other
+  extracted?: { question: string; options: { label: string; text: string }[]; type: string };
+  correctLabels?: string[];  // option labels picked by the answer stage
 };
 
 export type WatcherWatch = {
@@ -57,7 +63,15 @@ export type WatcherWatch = {
   // capture order. The watcher detail view shows only the newest LIVE_MAX on
   // the left (each with its extraction + question + answer); everything older
   // moves to the Archive tab. Ignored screens drop out of both lists.
-  shots: { id: string; at: number; image?: string; text: string; questionIndex?: number; ignored?: boolean }[];
+  // pipeline records the posting status of each screen through the two-stage
+  // AI flow (extract -> answer), so the control room can show a live status
+  // column per screenshot: queued / extracting / extracted / answering /
+  // answered / failed, with timings and any error message.
+  shots: WatcherShot[];
+  // SHA-256 of every screenshot image already processed this watch — the
+  // duplicate cache that stops re-billing the same screen (mirrors the
+  // optional hash cache in quiz_tool.py).
+  shotHashes?: string[];
   // last question text seen, to detect a new question appearing
   lastSeen: string;
   notes: string;
@@ -66,6 +80,33 @@ export type WatcherWatch = {
   storedDocs?: string[];
   // throttle for per-screen AI exam detection (in-memory, not persisted)
   lastDetect?: number;
+};
+
+// Pipeline stage of one screenshot inside the two-stage AI flow, mirroring
+// quiz_tool.py: EXTRACT (vision model reads the question + options out of the
+// image) then ANSWER (text-only model produces the correct labels). The
+// control room shows this status in the middle column while it runs.
+export type ShotStage = "queued" | "extracting" | "extracted" | "answering" | "answered" | "failed";
+
+export type ShotPipeline = {
+  stage: ShotStage;
+  at?: number;              // when the current stage started
+  model?: string;           // extract model used
+  answerModel?: string;     // answer model used
+  error?: string;           // last failure reason (stage stays retryable)
+  tokensIn?: number;        // usage reported by the provider, if available
+  tokensOut?: number;
+};
+
+export type WatcherShot = {
+  id: string;
+  at: number;
+  image?: string;
+  text: string;
+  questionIndex?: number;
+  ignored?: boolean;
+  hash?: string;            // SHA-256 of the image bytes — duplicate cache key
+  pipeline?: ShotPipeline;
 };
 
 export type RepoDoc = {
@@ -125,6 +166,7 @@ export type WatcherBackend = {
   save(data: Data): Promise<void>;
   saveImage?(name: string, buf: Buffer): Promise<string>;
   removeImage?(name: string): Promise<void>;
+  readImage?(name: string): Promise<Buffer | undefined>;
   imageUrl?(name: string): string;
 };
 
@@ -177,6 +219,9 @@ export function fileWatcherBackend(dir: string): WatcherBackend {
     async removeImage(name) {
       try { await unlink(path.join(imgDir, path.basename(name))); } catch { /* already gone */ }
     },
+    async readImage(name) {
+      try { return await readFile(path.join(imgDir, path.basename(name))); } catch { return undefined; }
+    },
     imageUrl: (name) => `/api/watcher/img/${encodeURIComponent(name)}`,
   };
 }
@@ -207,6 +252,7 @@ export function memoryWatcherBackend(): WatcherBackend {
     async save(next) { data = structuredClone(next); },
     async saveImage(name, buf) { imgs.set(name, buf); return name; },
     async removeImage(name) { imgs.delete(name); },
+    async readImage(name) { return imgs.get(name); },
     imageUrl: (name) => `/api/watcher/img/${encodeURIComponent(name)}`,
   };
 }
@@ -552,25 +598,33 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
     return client.client;
   };
 
-  // Optional OpenAI-compatible fallback provider (any gateway): set
-  // WATCHER_LLM_URL + WATCHER_LLM_KEY on the relay to use it when no
-  // Anthropic key is configured — keeps the engine fully AI-guided.
-  async function askOpenCompatible(system: string, user: string, maxTokens: number) {
+  // Token accounting per screenshot pipeline (mirrors quiz_tool.py's usage
+  // logging): input/output tokens summed across every AI call made while a
+  // shot moves through extract -> answer.
+  let usage = { in: 0, out: 0 };
+  const addUsage = (i?: number, o?: number) => { usage.in += i ?? 0; usage.out += o ?? 0; };
+
+  async function askOpenCompatible(system: string, user: string, maxTokens: number, image?: Buffer) {
     const url = process.env["WATCHER_LLM_URL"];
     const k = process.env["WATCHER_LLM_KEY"];
     if (!url || !k) throw new WatcherError(400, "No AI provider configured.");
+    const model = settings.model && !settings.model.startsWith("claude-") ? settings.model : "gpt-4o-mini";
+    const content = image
+      ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` } }]
+      : user;
     const res = await fetch(url.replace(/\/$/, "") + "/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${k}` },
       body: JSON.stringify({
-        model: settings.model && !settings.model.startsWith("claude-") ? settings.model : "gpt-4o-mini",
+        model,
         max_tokens: maxTokens, temperature: 0.2,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+        messages: [{ role: "system", content: system }, { role: "user", content }],
       }),
-      signal: AbortSignal.timeout(45_000),
+      signal: AbortSignal.timeout(60_000),
     });
     if (!res.ok) throw new WatcherError(502, `LLM provider responded ${res.status}`);
-    const j = await res.json() as { choices?: { message?: { content?: string } }[] };
+    const j = await res.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    addUsage(j.usage?.prompt_tokens, j.usage?.completion_tokens);
     return String(j.choices?.[0]?.message?.content ?? "").trim();
   }
 
@@ -590,8 +644,47 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       fallbacks: "default",
       messages: [{ role: "user", content: user }],
     } as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming);
+    const u = (response as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+    addUsage(u?.input_tokens, u?.output_tokens);
     if (response.stop_reason === "refusal") return "";
     return response.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n").trim();
+  }
+
+  // Two-stage extraction, stage 1 (vision): send the actual screenshot to the
+  // model, exactly like quiz_tool.py's EXTRACT step — the image plus verbatim-
+  // copy instructions come back as strict JSON {question_number, question_type,
+  // question, options:[{label,text}]}. Falls back to OCR text when no image or
+  // no vision-capable provider is configured.
+  async function askVision(system: string, user: string, image?: Buffer, maxTokens = 900) {
+    if (image && key()) {
+      const response = await anthropic().beta.messages.create({
+        model: settings.model || DEFAULT_MODEL,
+        max_tokens: maxTokens,
+        system,
+        output_config: { effort: "low" },
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: "default",
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.toString("base64") } },
+          { type: "text", text: user },
+        ] }],
+      } as Anthropic.Beta.Messages.MessageCreateParamsNonStreaming);
+      const u = (response as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
+      addUsage(u?.input_tokens, u?.output_tokens);
+      if (response.stop_reason === "refusal") return "";
+      return response.content.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n").trim();
+    }
+    return ask(system, user, maxTokens);
+  }
+
+  // Load a stored screenshot back from the backend (memory map or disk dir)
+  // so the vision stage can re-send it after a capture already landed.
+  async function loadImage(name?: string): Promise<Buffer | undefined> {
+    if (!name) return undefined;
+    try {
+      const b = backend as WatcherBackend & { readImage?(n: string): Promise<Buffer | undefined> };
+      return b.readImage ? await b.readImage(name) : undefined;
+    } catch { return undefined; }
   }
 
   const find = (sessionId: string) => watches.find((w) => w.sessionId === sessionId);
@@ -784,6 +877,137 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
     q.explanation = "No answer found in the repository or online. An admin should answer this manually.";
   }
 
+  // --- Two-stage screenshot pipeline (quiz_tool.py port) ---------------------
+  // Stage 1 EXTRACT: the screenshot image + verbatim-copy instructions go to
+  // the vision model; strict JSON comes back:
+  //   {question_number, question_type, question, options:[{label,text}]}
+  // UI noise (Save/Note/Submit buttons, progress bars, timers) is stripped by
+  // the prompt, "select all that apply" becomes multi-select. The result is
+  // stored on the question so the Q&A format is retained end-to-end.
+  // Stage 2 ANSWER: TEXT ONLY (no image — saves tokens). Repository evidence
+  // first, then online research, then model knowledge; the recommendation
+  // carries correct option labels, a brief explanation and a confidence level
+  // (high|medium|low), exactly like quiz_tool.py's answer schema.
+  // Every stage updates shot.pipeline so the control room's middle column can
+  // show live posting status: queued → extracting → extracted → answering →
+  // answered (or failed, retryable).
+  const EXTRACT_SYSTEM = [
+    "You extract exam questions from screenshots of an online quiz.",
+    "Copy the question text VERBATIM (fix only obvious OCR errors). Keep every option with the letter shown on screen; assign A, B, C… if none are labelled.",
+    "IGNORE UI elements: buttons (Save, Note, Submit, Next), tags, progress bars, timers, headers, watermarks.",
+    "Detect 'select two' / 'choose all that apply' as multiple_choice_multi_select; true/false statements as true_false.",
+    "Reply in strict JSON only:",
+    '{"question_number": "e.g. 3 or \'3 of 10\' or null", "question_type": "single_choice|multiple_choice_multi_select|true_false|other", "question": "...", "options": [{"label":"A","text":"..."}]}',
+  ].join(" ");
+
+  const ANSWER_LABELS_SYSTEM = [
+    "You answer one multiple-choice quiz question from its text and options only (the image is not shown, to save tokens).",
+    "Pick the correct option label(s). For multi-select questions return every correct label.",
+    "Prefer repository evidence over online evidence over your own knowledge; say so briefly.",
+    "Reply in strict JSON only:",
+    '{"correct_labels": ["A"], "explanation": "1-2 sentences", "confidence": "high|medium|low"}',
+  ].join(" ");
+
+  const CONFIDENCE_VALUE: Record<string, number> = { high: 0.9, medium: 0.65, low: 0.4 };
+
+  async function runShotPipeline(w: WatcherWatch, shotId: string) {
+    const shot = w.shots.find((s) => s.id === shotId);
+    if (!shot || shot.ignored) return;
+    const setStage = (stage: ShotStage, error?: string) => {
+      shot.pipeline = { ...(shot.pipeline ?? {}), stage, at: clock(), ...(error ? { error } : {}) };
+      persistSoon();
+    };
+
+    // Reuse an existing linked question when this shot already produced one
+    // (re-analyse / retry), otherwise create it below.
+    let q = shot.questionIndex != null ? w.questions.find((x) => x.n === shot.questionIndex) : undefined;
+
+    // ---- Stage 1: EXTRACT ----------------------------------------------------
+    setStage("extracting");
+    let extracted: { num: number | null; type: string; stem: string; options: { label: string; text: string }[] } | null = null;
+    try {
+      const img = await loadImage(shot.image);
+      const raw = aiReady()
+        ? await askVision(EXTRACT_SYSTEM, `<ocr-text>\n${(shot.text || "").slice(0, 2500)}\n</ocr-text>`, img)
+        : "";
+      const j = extractJson(raw);
+      if (j && typeof j.question === "string" && j.question.trim()) {
+        const opts = Array.isArray(j.options)
+          ? j.options.slice(0, 8).map((o: Record<string, unknown>, i: number) => ({
+              label: line(o?.label, 4).toUpperCase() || String.fromCharCode(65 + i),
+              text: line(o?.text, 400),
+            })).filter((o: { text: string }) => o.text)
+          : [];
+        const nnum = Number(String(j.question_number ?? "").match(/\d+/)?.[0]);
+        extracted = {
+          num: Number.isFinite(nnum) && nnum > 0 ? nnum : null,
+          type: ["single_choice", "multiple_choice_multi_select", "true_false", "other"].includes(String(j.question_type)) ? String(j.question_type) : "other",
+          stem: multi(j.question, MAX_TEXT),
+          options: opts,
+        };
+      }
+    } catch (err) {
+      // Vision extraction failed — fall back to the OCR-text structure below.
+      shot.pipeline = { ...(shot.pipeline ?? {}), error: (err as Error).message?.slice(0, 200) };
+    }
+    if (!extracted) {
+      // Fallback: browser OCR text + heuristic/format/AI-text structure.
+      const st = await structureScreen(shot.text || "");
+      if (st.stem || st.options.length) {
+        extracted = {
+          num: st.num, type: st.options.length >= 2 ? "single_choice" : "other",
+          stem: st.stem || shot.text || "",
+          options: st.options.map((o, i) => {
+            const m = o.match(/^([A-Z])[).\s]\s*(.*)$/);
+            return { label: m ? m[1] : String.fromCharCode(65 + i), text: (m ? m[2] : o).slice(0, 400) };
+          }),
+        };
+      }
+    }
+    if (!extracted || !extracted.stem.trim()) {
+      setStage("failed", "No question could be extracted from this screen.");
+      return;
+    }
+
+    // Merge into the watch's ordered question list (duplicate prevention lives
+    // in addQuestion: exact match anywhere in the list, then similarity merge).
+    const optLines = extracted.options.map((o) => `${o.label}. ${o.text}`);
+    if (!q) {
+      q = addQuestion(w, extracted.stem, optLines, shot.image, shot.id) ?? undefined;
+      if (!q) {
+        // Merged into an existing duplicate question — keep its record, just
+        // refresh the structured fields if the new read is richer.
+        const dup = w.questions.find((x) => x.n === shot.questionIndex) ?? w.questions.at(-1);
+        if (dup) { q = dup; if (optLines.length > (dup.options?.length ?? 0)) dup.options = optLines; }
+      }
+    }
+    if (!q) { setStage("failed", "The question list is full."); return; }
+    shot.questionIndex = q.n;
+    q.questionType = extracted.type;
+    q.questionNumber = extracted.num ?? undefined;
+    q.extracted = { question: extracted.stem, options: extracted.options, type: extracted.type };
+    setStage("extracted");
+
+    // ---- Stage 2: ANSWER (text only) ----------------------------------------
+    setStage("answering");
+    try {
+      await researchOne(w, q);
+      // If the AI returned free-form answer text, align it with option labels
+      // so the Q&A keeps the "A/B/C/D + text" format.
+      if (q.status === "answered" && q.extracted?.options.length) {
+        const labels = q.answer.toUpperCase().match(/\b[A-D]\b/g) ?? [];
+        if (labels.length) q.correctLabels = [...new Set(labels)];
+        const hit = q.extracted.options.filter((o) => q.correctLabels?.includes(o.label));
+        if (hit.length) q.answer = hit.map((o) => `${o.label}. ${o.text}`).join(" · ").slice(0, 500);
+      }
+      shot.pipeline = { ...shot.pipeline!, stage: "answered", at: clock(), model: settings.model, tokensIn: usage.in, tokensOut: usage.out };
+    } catch (err) {
+      setStage("failed", (err as Error).message?.slice(0, 200) ?? "answer research failed");
+      return;
+    }
+    persistSoon();
+  }
+
   // End of exam/session for one watch: mark completed and store the two
   // documents (reading material + questions & answers) in the repository.
   async function finalize(w: WatcherWatch, reason: string) {
@@ -900,12 +1124,18 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       const now = clock();
       w.updatedAt = now;
 
-      // Save the screenshot if the viewer sent one.
+      // Save the screenshot if the viewer sent one. SHA-256 of the image acts
+      // as the duplicate cache (like quiz_tool.py's hash cache): a byte-ident
+      // -ical screen already processed this watch is never re-billed — it only
+      // refreshes the timestamp of the shot it matches.
       let imageName: string | undefined;
+      let imageHash: string | undefined;
       if (image && image.length > 100 && image.length <= MAX_DOC_BYTES && backend.saveImage) {
+        imageHash = createHash("sha256").update(image).digest("hex");
         imageName = `${sessionId}-${now}.jpg`;
         try { await backend.saveImage(imageName, image); } catch { imageName = undefined; }
       }
+      const dupHash = imageHash && w.shots.some((s) => s.hash === imageHash && !s.ignored) ? imageHash : undefined;
 
       // Screenshot strip: keep every settled screen with readable text, in
       // capture order, so the control room can show them under the session
@@ -913,17 +1143,25 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       // static screen are merged into the newest one (no duplicates).
       if (imageName || text) {
         const last = w.shots.at(-1);
-        const sameScreen = !!last && !!imageName === !!last.image &&
+        const sameScreen = !!last && !last.ignored && !!imageName === !!last.image &&
+          (!dupHash || last.hash === dupHash) &&
           (!text || !last.text || simWords(last.text, text) >= 0.9);
         if (sameScreen && last) {
           last.at = now;
           if (imageName) {
-            if (last.image) void backend.removeImage?.(last.image).catch?.(() => {});
+            if (last.image && last.image !== imageName) void backend.removeImage?.(last.image).catch?.(() => {});
             last.image = imageName;
+            if (imageHash) last.hash = imageHash;
           }
           if (text) last.text = text;
+        } else if (dupHash) {
+          // Identical image seen again (exam pager cycling back to a question):
+          // touch the existing shot instead of adding a duplicate entry.
+          const prev = w.shots.find((s) => s.hash === dupHash && !s.ignored);
+          if (prev) { prev.at = now; if (text && text.length > prev.text.length) prev.text = text.slice(0, MAX_TEXT); }
         } else {
-          w.shots.push({ id: newId(), at: now, image: imageName, text: text.slice(0, MAX_TEXT) });
+          w.shots.push({ id: newId(), at: now, image: imageName, text: text.slice(0, MAX_TEXT), hash: imageHash, pipeline: { stage: "queued", at: now } });
+          if (imageHash) { (w.shotHashes ??= []).push(imageHash); if (w.shotHashes.length > MAX_SHOTS) w.shotHashes.shift(); }
           if (w.shots.length > MAX_SHOTS) {
             const dropped = w.shots.shift()!;
             if (dropped.image) void backend.removeImage?.(dropped.image).catch?.(() => {});
@@ -1002,23 +1240,32 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       if (w.phase === "completed") throw new WatcherError(409, "This watch is already completed.");
       const shot = w.shots.find((s) => s.id === shotId);
       if (!shot) throw new WatcherError(404, "That screenshot is no longer in the strip.");
-      if (shot.questionIndex && w.questions.some((q) => q.n === shot.questionIndex)) {
-        const q = w.questions.find((x) => x.n === shot.questionIndex)!;
-        await api.reResearch(sessionId, q.n);
-        return { ...q };
-      }
-      const pq = parseQuestion(shot.text || "");
-      const body = (pq.stem || shot.text || "").slice(0, MAX_TEXT);
-      if (!body.trim()) throw new WatcherError(409, "No readable text was found on that screen.");
+      if (shot.ignored) throw new WatcherError(409, "This screenshot is ignored; un-ignore it first.");
       w.phase = "in-exam";
       if (!w.examTitle) w.examTitle = "Exam (from screenshot)";
       w.updatedAt = clock();
-      addQuestion(w, body, pq.options, shot.image, shot.id);
+      // Two-stage run: EXTRACT from the image (vision) then ANSWER text-only.
+      // A re-analyse of an already-linked shot refreshes the same question.
+      await runShotPipeline(w, shotId);
       await persistNow();
       const linked = w.shots.find((s) => s.id === shotId)?.questionIndex;
       const q = w.questions.find((x) => x.n === linked);
-      if (q) await api.reResearch(sessionId, q.n);
       return { ...(q ?? { n: 0 }) };
+    },
+
+    // Ignore / restore one screenshot: an ignored screen drops out of the live
+    // strip and the archive, its extracted question stays untouched unless the
+    // admin deletes it separately. Ignored shots are never auto-analysed or
+    // matched as duplicates.
+    async ignoreShot(sessionId: string, shotId: string, ignored = true) {
+      const w = find(sessionId);
+      if (!w) throw new WatcherError(404, "No question watcher for that session.");
+      const shot = w.shots.find((s) => s.id === shotId);
+      if (!shot) throw new WatcherError(404, "That screenshot is no longer in the strip.");
+      shot.ignored = ignored;
+      w.updatedAt = clock();
+      await persistNow();
+      return { id: shot.id, ignored };
     },
 
     // Admin accepts or corrects a recommended answer.
