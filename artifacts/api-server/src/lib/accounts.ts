@@ -82,10 +82,10 @@ export function fileBackend(dir: string): Backend {
 // Stores the whole account document as one row, so no migration step is
 // needed when the relay runs with a database (DATABASE_URL).
 export async function postgresBackend(url: string): Promise<Backend> {
-  const { createPgPool } = await import("./pgpool");
+  const { createPgPool, withPgFallback } = await import("./pgpool");
   const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore: Backend = {
     describe: "PostgreSQL (DATABASE_URL)",
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'accounts'");
@@ -98,6 +98,7 @@ export async function postgresBackend(url: string): Promise<Backend> {
       );
     },
   };
+  return { describe: pgStore.describe, ...withPgFallback(pgStore) };
 }
 
 export function memoryBackend(initial?: Data): Backend {

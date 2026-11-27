@@ -227,10 +227,10 @@ export function fileWatcherBackend(dir: string): WatcherBackend {
 }
 
 export async function postgresWatcherBackend(url: string): Promise<WatcherBackend> {
-  const { createPgPool } = await import("./pgpool");
+  const { createPgPool, withPgFallback } = await import("./pgpool");
   const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore: WatcherBackend = {
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'watcher'");
       return r.rows[0]?.data as Data | undefined;
@@ -242,6 +242,7 @@ export async function postgresWatcherBackend(url: string): Promise<WatcherBacken
       );
     },
   };
+  return withPgFallback(pgStore);
 }
 
 export function memoryWatcherBackend(): WatcherBackend {

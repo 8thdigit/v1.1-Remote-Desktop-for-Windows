@@ -34195,7 +34195,8 @@ var init_esm = __esm({
 // src/lib/pgpool.ts
 var pgpool_exports = {};
 __export(pgpool_exports, {
-  createPgPool: () => createPgPool
+  createPgPool: () => createPgPool,
+  withPgFallback: () => withPgFallback
 });
 function createPgPool(url) {
   return Promise.resolve().then(() => (init_esm(), esm_exports)).then(({ default: pg2 }) => {
@@ -34215,6 +34216,33 @@ function createPgPool(url) {
     });
     return pool;
   });
+}
+function withPgFallback(backend) {
+  let snapshot;
+  const log = logger;
+  const warn = (m, err) => log.warn ? log.warn({ err }, m) : console.warn(m, err);
+  return {
+    ...backend.describe ? { describe: backend.describe } : {},
+    async load() {
+      try {
+        const data = await backend.load();
+        if (data !== void 0) snapshot = structuredClone(data);
+        return data;
+      } catch (err) {
+        if (snapshot === void 0) throw err;
+        warn("Postgres read failed (region unhealthy?); serving last-known state", err);
+        return structuredClone(snapshot);
+      }
+    },
+    async save(data) {
+      snapshot = structuredClone(data);
+      try {
+        await backend.save(data);
+      } catch (err) {
+        warn("Postgres write failed (region unhealthy?); state kept locally and will be retried", err);
+      }
+    }
+  };
 }
 var init_pgpool = __esm({
   "src/lib/pgpool.ts"() {
@@ -72407,10 +72435,10 @@ function fileBackend(dir) {
   };
 }
 async function postgresBackend(url) {
-  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const { createPgPool: createPgPool2, withPgFallback: withPgFallback2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
   const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore = {
     describe: "PostgreSQL (DATABASE_URL)",
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'accounts'");
@@ -72423,6 +72451,7 @@ async function postgresBackend(url) {
       );
     }
   };
+  return { describe: pgStore.describe, ...withPgFallback2(pgStore) };
 }
 var AccountError = class extends Error {
   status;
@@ -72683,10 +72712,10 @@ function fileBillingBackend(dir) {
   };
 }
 async function postgresBillingBackend(url) {
-  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const { createPgPool: createPgPool2, withPgFallback: withPgFallback2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
   const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore = {
     describe: "PostgreSQL (DATABASE_URL)",
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'billing'");
@@ -72699,6 +72728,7 @@ async function postgresBillingBackend(url) {
       );
     }
   };
+  return { describe: pgStore.describe, ...withPgFallback2(pgStore) };
 }
 var clampInt = (v, min, max) => {
   const n = Math.trunc(Number(v));
@@ -73288,10 +73318,10 @@ function fileSiteBackend(dir) {
   };
 }
 async function postgresSiteBackend(url) {
-  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const { createPgPool: createPgPool2, withPgFallback: withPgFallback2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
   const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore = {
     describe: "PostgreSQL (DATABASE_URL)",
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'site'");
@@ -73304,6 +73334,7 @@ async function postgresSiteBackend(url) {
       );
     }
   };
+  return { describe: pgStore.describe, ...withPgFallback2(pgStore) };
 }
 var line = (v, max) => String(v ?? "").replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 var multi = (v, max) => String(v ?? "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "").slice(0, max);
@@ -73583,10 +73614,10 @@ function fileBuddyBackend(dir) {
   };
 }
 async function postgresBuddyBackend(url) {
-  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const { createPgPool: createPgPool2, withPgFallback: withPgFallback2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
   const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore = {
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'buddy'");
       return r.rows[0]?.data;
@@ -73598,6 +73629,7 @@ async function postgresBuddyBackend(url) {
       );
     }
   };
+  return withPgFallback2(pgStore);
 }
 var line2 = (v, max) => String(v ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 var multi2 = (v, max) => String(v ?? "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
@@ -74177,10 +74209,10 @@ function fileWatcherBackend(dir) {
   };
 }
 async function postgresWatcherBackend(url) {
-  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const { createPgPool: createPgPool2, withPgFallback: withPgFallback2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
   const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore = {
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'watcher'");
       return r.rows[0]?.data;
@@ -74192,6 +74224,7 @@ async function postgresWatcherBackend(url) {
       );
     }
   };
+  return withPgFallback2(pgStore);
 }
 var line3 = (v, max) => String(v ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 var multi3 = (v, max) => String(v ?? "").replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, max);
@@ -75252,10 +75285,10 @@ function fileLinkLogBackend(dir) {
   };
 }
 async function postgresLinkLogBackend(url) {
-  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const { createPgPool: createPgPool2, withPgFallback: withPgFallback2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
   const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore = {
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'links'");
       return r.rows[0]?.data;
@@ -75267,6 +75300,7 @@ async function postgresLinkLogBackend(url) {
       );
     }
   };
+  return withPgFallback2(pgStore);
 }
 async function createLinkLog(backend) {
   const loaded = await backend.load();
