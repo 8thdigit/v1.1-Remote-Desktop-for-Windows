@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"image"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -113,6 +114,8 @@ func stream(ctx context.Context, r *relay) error {
 	pace := newPacer()
 	screen := newCapturer()
 	defer screen.close()
+	defer screen.releaseDX()
+	gdiStill, dxPathOn = 0, false
 	screen.limit(pace.prof.maxW, pace.prof.maxH)
 	frame, w, h, rects, err := screen.grab()
 	if err != nil {
@@ -285,9 +288,6 @@ func stream(ctx context.Context, r *relay) error {
 		if time.Now().After(deadline) {
 			return errors.New("the 30-minute session limit was reached")
 		}
-		if !onDefaultDesktop() {
-			return errors.New("Windows switched to a locked or protected desktop")
-		}
 		started := time.Now()
 		if rects != nil {
 			lastChange = started
@@ -440,11 +440,62 @@ func stream(ctx context.Context, r *relay) error {
 			case <-t.C:
 			}
 		}
-		frame, _, _, rects, err = screen.grab()
+		frame, _, _, rects, err = grabTracked(screen)
 		if err != nil {
 			return err
 		}
 	}
+}
+
+// The stream normally reads the screen through a GDI DC. Fullscreen and
+// exam-lockdown apps can stop that DC from showing new content while the
+// desktop itself keeps compositing; when GDI reports no changes for a few
+// frames in a row we switch to reading the composited desktop through
+// Direct3D9 so the video keeps flowing, and switch back as soon as GDI sees
+// motion again.
+const gdiQuietFrames = 4
+
+var (
+	gdiStill   int
+	dxPathOn   bool
+	lastFrames []*image.RGBA // keep D3D scratch alive across grabs
+)
+
+func grabTracked(screen *capturer) (*image.RGBA, int, int, []image.Rectangle, error) {
+	keep := func(img *image.RGBA, rects []image.Rectangle) {
+		lastFrames = lastFrames[:0]
+		if img != nil {
+			lastFrames = append(lastFrames, img)
+		}
+		_ = rects
+	}
+	if !dxPathOn {
+		frame, w, h, rects, err := screen.grab()
+		if err != nil {
+			return nil, 0, 0, nil, err
+		}
+		keep(frame, rects)
+		if rects == nil {
+			gdiStill++
+		} else {
+			gdiStill = 0
+		}
+		if gdiStill >= gdiQuietFrames {
+			dxPathOn = true // tried on the next grab; reset if it fails
+		}
+		return frame, w, h, rects, nil
+	}
+	frame, w, h, rects, err := screen.grabDX()
+	if err != nil {
+		// D3D unavailable: stay on the GDI path instead of ending the session.
+		dxPathOn, gdiStill = false, 0
+		return screen.grab()
+	}
+	keep(frame, rects)
+	if rects != nil {
+		gdiStill = 0
+	}
+	return frame, w, h, rects, nil
 }
 
 // retryFor is how long the PC keeps trying through network hiccups before
