@@ -99,7 +99,17 @@ async function open(): Promise<Accounts> {
   const url = process.env["DATABASE_URL"];
   let backend;
   if (url) {
-    backend = await postgresBackend(url);
+    try {
+      backend = await postgresBackend(url);
+    } catch (err) {
+      // Same guard as the buddy/watcher stores: when Postgres is unhealthy
+      // (one region down, failover in progress, pool timeout), do not take
+      // the portal down with it — fall back to the relay's file store so
+      // sign-in and admin requests keep working instead of returning
+      // "Something went wrong on the relay".
+      console.warn("Accounts: store unavailable, falling back to file storage", err);
+      backend = fileBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+    }
   } else {
     const dir = process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data");
     backend = fileBackend(dir);
@@ -137,10 +147,19 @@ export function accountsReady() {
 // or PostgreSQL). Its license signing key is BILLING_SECRET when set, else
 // the SESSION_SECRET, so licenses survive restarts like login cookies do.
 async function openBilling(): Promise<Billing> {
+  const dir = process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data");
   const url = process.env["DATABASE_URL"];
-  const backend = url
-    ? await postgresBillingBackend(url)
-    : fileBillingBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+  let backend;
+  if (url) {
+    try {
+      backend = await postgresBillingBackend(url);
+    } catch (err) {
+      console.warn("Billing: store unavailable, falling back to file storage", err);
+      backend = fileBillingBackend(dir);
+    }
+  } else {
+    backend = fileBillingBackend(dir);
+  }
   const secret = process.env["BILLING_SECRET"] || process.env["SESSION_SECRET"];
   const { init, api } = createBilling(backend, { secret });
   await init;
@@ -162,9 +181,17 @@ export function billingReady() {
 // URL stays tied to the company that authored it across relay restarts.
 async function openLinkLog(): Promise<LinkLog> {
   const url = process.env["DATABASE_URL"];
-  const backend = url
-    ? await postgresLinkLogBackend(url)
-    : fileLinkLogBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+  let backend;
+  if (url) {
+    try {
+      backend = await postgresLinkLogBackend(url);
+    } catch (err) {
+      console.warn("Link register: store unavailable, falling back to file storage", err);
+      backend = fileLinkLogBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+    }
+  } else {
+    backend = fileLinkLogBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+  }
   const log = await createLinkLog(backend);
   store.restoreClaims(log.activeClaims(Date.now()));
   return log;
@@ -203,9 +230,17 @@ export async function linkRegister(filter: { accountId?: string } = {}) {
 // Site settings and access requests share the accounts' storage location.
 async function openSite(): Promise<Site> {
   const url = process.env["DATABASE_URL"];
-  const backend = url
-    ? await postgresSiteBackend(url)
-    : fileSiteBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+  let backend;
+  if (url) {
+    try {
+      backend = await postgresSiteBackend(url);
+    } catch (err) {
+      console.warn("Site settings: store unavailable, falling back to file storage", err);
+      backend = fileSiteBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+    }
+  } else {
+    backend = fileSiteBackend(process.env["MSFWR_DATA_DIR"] || path.resolve(process.cwd(), ".data"));
+  }
   const { init, api } = createSite(backend);
   await init;
   return api;

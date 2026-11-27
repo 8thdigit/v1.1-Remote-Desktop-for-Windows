@@ -54,8 +54,8 @@ export function fileLinkLogBackend(dir: string): LinkLogBackend {
 
 // One row in the msfwr_state table the accounts and billing already use.
 export async function postgresLinkLogBackend(url: string): Promise<LinkLogBackend> {
-  const { default: pg } = await import("pg");
-  const pool = new pg.Pool({ connectionString: url, max: 2 });
+  const { createPgPool } = await import("./pgpool");
+  const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     async load() {
