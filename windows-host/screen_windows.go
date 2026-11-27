@@ -22,6 +22,7 @@ var (
 	openDesktop     = user.NewProc("OpenInputDesktop")
 	closeDesktop    = user.NewProc("CloseDesktop")
 	getObjectInfo   = user.NewProc("GetUserObjectInformationW")
+	wtsGetActive    = syscall.NewLazyDLL("kernel32.dll").NewProc("WTSGetActiveConsoleSessionId")
 	createDC        = gdi.NewProc("CreateCompatibleDC")
 	deleteDC        = gdi.NewProc("DeleteDC")
 	createDIB       = gdi.NewProc("CreateDIBSection")
@@ -49,24 +50,24 @@ const (
 // d3d9PresentFlags mirrors D3DPRESENT_PARAMETERS (the trailing fields are
 // zeroed by Go's allocator before we fill what matters).
 type d3d9PresentFlags struct {
-	BackBufferWidth                uint32
-	BackBufferHeight               uint32
-	BackBufferFormat               uint32
-	BackBufferCount                uint32
-	MultiSampleType                uint32
-	MultiSampleQuality             uint32
-	SwapEffect                     uint32
-	hDeviceWindow                  uintptr
-	Windowed                       uint32
-	EnableAutoDepthStencil         uint32
-	AutoDepthStencilFormat         uint32
-	Flags                          uint32
-	FullScreen_RefreshRateInHz     uint32
-	PresentationInterval   uint32
-	DepthSwapEffect        uint32
-	Usage                  uint32
-	Win8                   uint32
-	_                      [3]uint32
+	BackBufferWidth            uint32
+	BackBufferHeight           uint32
+	BackBufferFormat           uint32
+	BackBufferCount            uint32
+	MultiSampleType            uint32
+	MultiSampleQuality         uint32
+	SwapEffect                 uint32
+	hDeviceWindow              uintptr
+	Windowed                   uint32
+	EnableAutoDepthStencil     uint32
+	AutoDepthStencilFormat     uint32
+	Flags                      uint32
+	FullScreen_RefreshRateInHz uint32
+	PresentationInterval       uint32
+	DepthSwapEffect            uint32
+	Usage                      uint32
+	Win8                       uint32
+	_                          [3]uint32
 }
 
 // d3d9Mode mirrors D3DDISPLAYMODE.
@@ -87,6 +88,7 @@ func slot(obj uintptr, index int) uintptr {
 	v := *(*uintptr)(unsafe.Pointer(obj))
 	return v + uintptr(index)*ptrSize
 }
+
 // The D3D9 back buffer holds the last presented frame of the default desktop,
 // which GDI screen DCs do not always expose once a fullscreen or lockdown
 // application takes over, so it serves as a second capture path. It is rebuilt
@@ -325,26 +327,33 @@ func desktopAllowed() bool {
 	return time.Since(nonDefaultSince) < secureDesktopGrace || composing()
 }
 
-// composing reports whether the desktop compositor is still producing frames
-// on the interactive window station — i.e. the machine is not sitting on the
-// lock/sign-in screen. It opens the Default desktop of the current window
-// station and checks its flags via GetUserObjectInformation.
+// composing reports whether the user's console session is still live — i.e.
+// the machine is not sitting on the lock/sign-in screen. Two signals:
+// first, OpenInputDesktop + GetUserObjectInformation flags (works when input
+// is on a switchable desktop); if that fails (a lockdown app has grabbed
+// input onto a non-switchable secure desktop), fall back to checking that an
+// active console session still exists via WTSGetActiveConsoleSessionId. A
+// signed-out/disconnected machine returns 0xFFFFFFFF there, so the stream
+// ends; an exam overlay keeps the session alive, so it continues.
 func composing() bool {
 	d, _, _ := openDesktop.Call(0, 0, 1) // OPEN_INPUT_DESKTOP / READ_CONTROL
-	if d == 0 {
-		return false
+	if d != 0 {
+		defer closeDesktop.Call(d)
+		var flags uint32
+		var size uint32
+		// UOI_FLAGS == 1; DESKTOP_RECYCLE (0x0200) is set while the desktop is
+		// still being composed, unlike a torn-down winlogon state. Accept
+		// either that or SWITCHDESKTOP (0x0100) for a normal interactive one.
+		ok, _, _ := getObjectInfo.Call(d, 1, uintptr(unsafe.Pointer(&flags)), 4, uintptr(unsafe.Pointer(&size)))
+		if ok != 0 && flags&(0x0100|0x0200) != 0 {
+			return true
+		}
 	}
-	defer closeDesktop.Call(d)
-	var flags uint32
-	var size uint32
-	// UOI_FLAGS == 1; DESKTOP_SWITCHDESKTOP (0x0100) is set only on desktops
-	// that can be brought forward, which excludes the disconnected/winlogon
-	// secure desktop states we must not keep "streaming" forever.
-	ok, _, _ := getObjectInfo.Call(d, 1, uintptr(unsafe.Pointer(&flags)), 4, uintptr(unsafe.Pointer(&size)))
-	if ok == 0 {
-		return false
-	}
-	return flags&0x0100 != 0
+	// Fallback: the console session is still attached and logged in. This is
+	// what lets the stream survive a lockdown browser's secure-desktop grab
+	// instead of dying at launch.
+	s, _, _ := wtsGetActive.Call()
+	return s != 0 && s != 0xFFFFFFFF
 }
 
 func metric(which uintptr) int {
