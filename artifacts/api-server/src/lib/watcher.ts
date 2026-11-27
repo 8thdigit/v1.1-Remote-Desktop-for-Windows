@@ -38,6 +38,7 @@ export type WatcherQuestion = {
   refs: string[];            // repo doc titles or URLs used
   confidence: number;        // 0..1
   correctedBy: string;       // admin who accepted/corrected
+  formatId?: string;         // exam-format profile matched from the format DB
 };
 
 export type WatcherWatch = {
@@ -53,9 +54,10 @@ export type WatcherWatch = {
   examTitle: string;
   questions: WatcherQuestion[];
   // Screenshot strip: every settled screen the AI Buddy panel forwards, in
-  // capture order. The watcher detail view lists these on the left; when an
-  // admin analyses one, it becomes (or merges into) a numbered question.
-  shots: { id: string; at: number; image?: string; text: string; questionIndex?: number }[];
+  // capture order. The watcher detail view shows only the newest LIVE_MAX on
+  // the left (each with its extraction + question + answer); everything older
+  // moves to the Archive tab. Ignored screens drop out of both lists.
+  shots: { id: string; at: number; image?: string; text: string; questionIndex?: number; ignored?: boolean }[];
   // last question text seen, to detect a new question appearing
   lastSeen: string;
   notes: string;
@@ -78,12 +80,35 @@ export type RepoDoc = {
   uploadedAt: number;
 };
 
+// Exam-format profile: learned from an uploaded question dump or a saved
+// exam-portal website so the extractor knows what this exam's screens look
+// like (question numbering, option style, marks line, section headers). The
+// watcher matches every screen against these profiles before parsing.
+export type FormatProfile = {
+  id: string;
+  name: string;
+  kind: "dump" | "site";    // learned from a question dump or a portal page
+  category: string;
+  sample: string;           // representative raw text the admin/dump showed
+  patterns: {               // regex sources discovered/confirmed for this format
+    question?: string;      // how a question starts ("Q7.", "7)", "Question 3:")
+    option?: string;        // option marker ("A.", "(b)", "•")
+    marks?: string;         // marks / points annotation
+    section?: string;       // section header ("Section B — MCQ")
+  };
+  notes: string;            // free-form description of the layout
+  sourceTitle?: string;     // repo doc it was learned from
+  createdBy: string;
+  createdAt: number;
+};
+
 export type WatcherSettings = {
   enabled: boolean;         // master switch for Inspect Buddy
-  ai: boolean;              // use Claude for exam detection + answering
+  ai: boolean;              // use Claude/Qwen for exam detection + answering
   webSearch: boolean;       // fall back to online research
   model: string;
   maxQuestions: number;
+  liveShots: number;        // screenshots kept on-screen (rest → Archive tab)
   updatedAt: number;
 };
 
@@ -92,6 +117,7 @@ type Data = {
   apiKey?: string;
   watches?: WatcherWatch[];
   docs?: RepoDoc[];
+  formats?: FormatProfile[];
 };
 
 export type WatcherBackend = {
@@ -113,6 +139,10 @@ const MAX_SHOTS = 40;
 const MAX_TEXT = 6000;
 const MAX_DOCS = 500;
 const MAX_DOC_BYTES = 8 * 1024 * 1024;
+const MAX_FORMATS = 100;
+// Screens the watcher detail keeps on the live left pane; older ones move to
+// the Archive tab (they stay in the record, nothing is deleted).
+export const LIVE_SHOTS = 3;
 export const DEFAULT_MODEL = "claude-opus-5-5";
 
 // Inspect Buddy ships ON as well: with both master switches on by default,
@@ -120,7 +150,7 @@ export const DEFAULT_MODEL = "claude-opus-5-5";
 // start producing questions without any admin setup. AI answer research is
 // still gated on a configured key (aiReady()), and admins can turn it off.
 export const DEFAULT_WATCHER_SETTINGS: WatcherSettings = {
-  enabled: true, ai: true, webSearch: true, model: DEFAULT_MODEL, maxQuestions: 60, updatedAt: 0,
+  enabled: true, ai: true, webSearch: true, model: DEFAULT_MODEL, maxQuestions: 60, liveShots: LIVE_SHOTS, updatedAt: 0,
 };
 
 // --- Backends ---
@@ -257,20 +287,113 @@ export function detectExamStart(text: string) {
   return detectExamStart2(text).hits;
 }
 
-// Parse a question block: leading number, body, A–D options.
-export function parseQuestion(text: string): { num: number | null; stem: string; options: string[] } {
+// Parse a question block: leading number, body, A–D options. When exam-format
+// profiles are available (learned from uploaded question dumps / portal sites)
+// their discovered patterns take precedence over the generic heuristics, so an
+// exam that numbers questions "7)" with "(a)" options parses cleanly.
+const safeRe = (src?: string, flags = "") => {
+  if (!src) return null;
+  try { return new RegExp(src, flags); } catch { return null; }
+};
+
+export function parseQuestion(text: string, formats: FormatProfile[] = []): { num: number | null; stem: string; options: string[]; formatId?: string } {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  // Pick the profile whose patterns actually describe this screen.
+  let best: FormatProfile | undefined;
+  let bestHits = 0;
+  for (const f of formats) {
+    let hits = 0;
+    if (safeRe(f.patterns.question)?.test(text)) hits += 2;
+    if (safeRe(f.patterns.option)?.test(text)) hits += 1;
+    if (safeRe(f.patterns.marks)?.test(text)) hits += 1;
+    if (hits > bestHits) { best = f; bestHits = hits; }
+  }
+  const qRe = best ? safeRe(best.patterns.question, "i") : null;
+  const oRe = best ? safeRe(best.patterns.option, "i") : null;
   let num: number | null = null;
   const stem: string[] = [];
   const options: string[] = [];
   for (const l of lines) {
-    const om = l.match(OPTION_LINE);
-    if (om) { options.push(`${om[1].toUpperCase()}. ${om[2]}`); continue; }
-    const nm: RegExpMatchArray | null = stem.length === 0 && !num ? l.match(QUESTION_NUM) : null;
-    if (nm) { num = Number(nm[1]); const rest = l.replace(QUESTION_NUM, "").trim(); if (rest) stem.push(rest); continue; }
+    const om = (oRe && l.match(oRe)) || l.match(OPTION_LINE);
+    if (om) {
+      const marker = (om[1] ?? "").toString();
+      const body = (om[2] ?? "").toString();
+      const letter = /^[a-dA-D]$/.test(marker) ? marker.toUpperCase() : String.fromCharCode(65 + options.length);
+      options.push(`${letter}. ${body.replace(/^[).:\-\u2022\s]+/, "").trim()}`.slice(0, 400));
+      continue;
+    }
+    const nm: RegExpMatchArray | null = stem.length === 0 && !num
+      ? (qRe ? l.match(qRe) : null) ?? (stem.length === 0 && !num ? l.match(QUESTION_NUM) : null)
+      : null;
+    if (nm) {
+      num = Number(nm[1]);
+      const rest = l.slice((nm.index ?? 0) + nm[0].length).trim();
+      if (rest) stem.push(rest);
+      continue;
+    }
     stem.push(l);
   }
-  return { num, stem: stem.join("\n").slice(0, MAX_TEXT), options };
+  return { num, stem: stem.join("\n").slice(0, MAX_TEXT), options, formatId: best?.id };
+}
+
+// --- Exam-format learning -------------------------------------------------
+// Given the text of a question dump or a saved exam-portal page, discover how
+// that exam writes its questions/options/marks so future screens parse with
+// the same rules. Pure heuristics first; the AI step only refines the result.
+
+export function learnFormatPatterns(text: string): FormatProfile["patterns"] {
+  const lines = String(text).split("\n").map((l) => l.trim()).filter(Boolean);
+  const tally = (re: RegExp, group: number) => {
+    const m = new Map<string, number>();
+    for (const l of lines) {
+      const hit = l.match(re);
+      if (hit && hit[group]) m.set(hit[group], (m.get(hit[group]) ?? 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  // Question markers: prefer the style seen on most distinct numbers.
+  const qStyles = [
+    { re: /^\s*Q(?:uestion)?\.?\s*(\d{1,3})[).:\s]/i, src: "^\\s*Q(?:uestion)?\\.?\\s*(\\d{1,3})[).:\\s]" },
+    { re: /^\s*(\d{1,3})\.\s+\S/, src: "^\\s*(\\d{1,3})\\.\\s+\\S" },
+    { re: /^\s*(\d{1,3})\)\s+\S/, src: "^\\s*(\\d{1,3})\\)\\s+\\S" },
+    { re: /^\s*(\d{1,3}):\\s+\S/, src: "^\\s*(\\d{1,3}):\\s+\\S" },
+  ];
+  let question: string | undefined;
+  let bestScore = 0;
+  for (const st of qStyles) {
+    const nums = tally(st.re, 1);
+    const score = nums.length * 2 + (nums[0]?.[1] ?? 0);
+    if (nums.length >= 2 && score > bestScore) { bestScore = score; question = st.src; }
+  }
+  // Option markers: letters in order across consecutive lines.
+  const optStyles = [
+    { re: /^\(?([a-dA-D])[\).\s]\s*\S/, src: "^\\(?([a-dA-D])[\\).\\s]" },
+    { re: /^[\u2022\u25cf\u00b7-]\s+(\w+)/, src: "^[\\u2022\\u00b7-]\\s+(\\w+)" },
+  ];
+  let option: string | undefined;
+  bestScore = 0;
+  for (const st of optStyles) {
+    const hits = tally(st.re, 1);
+    const letters = hits.filter(([v]) => /^[a-dA-D]$/.test(v)).length;
+    const score = letters >= 2 ? hits.reduce((t, [, c]) => t + c, 0) : 0;
+    if (score > bestScore) { bestScore = score; option = st.src; }
+  }
+  const marksLine = lines.find((l) => /\(\s*\d{1,3}\s*(?:marks?|pts?|points?)\s*\)|\bmarks?\s*[:\-]\s*\d/i.test(l));
+  const marks = marksLine ? (/\(\s*\d{1,3}\s*(?:marks?|pts?|points?)\s*\)/i.test(marksLine) ? "\\(\\s*\\d{1,3}\\s*(?:marks?|pts?|points?)\\s*\\)" : "\\bmarks?\\s*[:\\-]\\s*\\d") : undefined;
+  const section = lines.some((l) => /^\s*section\s+[a-z]\b/i.test(l)) ? "^\\s*section\\s+[a-z]\\b[^\\n]*" : undefined;
+  return { question, option, marks, section };
+}
+
+// Turn a dump/site text into a stored profile (AI may refine notes/patterns
+// later via api.learnFormat).
+export function buildFormatProfile(name: string, kind: FormatProfile["kind"], category: string, sample: string): FormatProfile {
+  const now = Date.now();
+  return {
+    id: randomBytes(6).toString("hex"),
+    name: name.slice(0, 160), kind, category: category.toLowerCase() || "general",
+    sample: sample.slice(0, 4000), patterns: learnFormatPatterns(sample),
+    notes: "", createdBy: "", createdAt: now,
+  };
 }
 
 // Simple word-overlap score between a question and a document (BM25-lite).
@@ -375,10 +498,13 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
   let apiKey = "";
   const watches: WatcherWatch[] = [];
   const docs: RepoDoc[] = [];
+  // Exam-format DB: profiles learned from uploaded question dumps and saved
+  // exam-portal websites; consulted by parseQuestion for every screen.
+  const formats: FormatProfile[] = [];
 
   let writing = Promise.resolve();
   let timer: NodeJS.Timeout | undefined;
-  const snapshot = (): Data => ({ settings, apiKey: apiKey || undefined, watches, docs });
+  const snapshot = (): Data => ({ settings, apiKey: apiKey || undefined, watches, docs, formats });
   const persistNow = () => {
     if (timer) { clearTimeout(timer); timer = undefined; }
     const data = structuredClone(snapshot());
@@ -406,6 +532,7 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       apiKey = typeof loaded?.apiKey === "string" ? loaded.apiKey : "";
       if (Array.isArray(loaded?.watches)) watches.push(...loaded.watches);
       if (Array.isArray(loaded?.docs)) docs.push(...loaded.docs);
+      if (Array.isArray(loaded?.formats)) formats.push(...loaded.formats);
     } catch (err) {
       console.warn("Inspect Buddy: watcher state is malformed, starting empty", err);
     }
@@ -448,6 +575,11 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
   }
 
   async function ask(system: string, user: string, maxTokens: number) {
+    // No Anthropic key but a Qwen model selected and DASHSCOPE_API_KEY set →
+    // route detection/extraction/answering through Qwen (OpenAI-compatible).
+    if (!key() && isQwenModel(settings.model) && process.env["DASHSCOPE_API_KEY"]) {
+      return askQwen(system, user, maxTokens);
+    }
     if (!key()) return askOpenCompatible(system, user, maxTokens);
     const response = await anthropic().beta.messages.create({
       model: settings.model || DEFAULT_MODEL,
@@ -469,13 +601,14 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
   // question twice; later frames of the current question update it in place.
   // The merged-into question may be anywhere in the list (a pager that shows
   // an earlier question again), not only the newest one.
-  function addQuestion(w: WatcherWatch, body: string, options: string[], image?: string, shotId?: string) {
+  function addQuestion(w: WatcherWatch, body: string, options: string[], image?: string, shotId?: string, formatId?: string) {
     const cap = Math.min(MAX_QUESTIONS, settings.maxQuestions);
     const linkShot = (n: number) => { if (shotId) { const s = w.shots.find((x) => x.id === shotId); if (s) s.questionIndex = n; } };
 
     // Exact duplicate check across the whole list first (cheap, catches a
     // re-shown screen verbatim), then a similarity check against the most
-    // recent questions (partial OCR / scrolling variants).
+    // recent questions (partial OCR / scrolling variants). Screens an admin
+    // ignored are never matched or re-added.
     const exact = w.questions.find((q) => q.text === body);
     const dupRecent = exact ?? w.questions.slice(-6).find((q) => simWords(q.text, body) >= 0.85);
     if (!dupRecent && simWords(w.lastSeen, body) < 0.85
@@ -485,6 +618,7 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
         n: w.questions.length + 1, at: clock(), text: body.slice(0, MAX_TEXT), image,
         options: options.slice(0, 8),
         status: "pending", answer: "", explanation: "", source: "", refs: [], confidence: 0, correctedBy: "",
+        formatId: formatId || undefined,
       };
       w.questions.push(q);
       w.lastSeen = body;
@@ -514,12 +648,79 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
   ].join(" ");
 
   const ANSWER_SYSTEM = [
-    "You prepare reading material for a proctored training review: given one exam question captured from a screen, plus research findings from the team's document repository and (optionally) online sources,",
+    "You prepare reading material for a proctored training review: given one exam question captured from a screen (OCR text may contain small recognition errors — interpret it charitably), plus research findings from the team's document repository and (optionally) online sources,",
     "produce the best-supported answer. Reply in strict JSON only:",
-    "{\"answer\": \"the answer, option letter + text for MCQ\", \"explanation\": \"1-3 sentences citing which evidence supports it\", \"source\": \"repo|online|ai\", \"confidence\": 0..1}.",
+    "{\"answer\": \"the answer, option letter + full option text for MCQ\", \"explanation\": \"1-3 sentences citing which evidence supports it\", \"source\": \"repo|online|ai\", \"confidence\": 0..1}.",
     "Prefer repository evidence over online evidence over your own knowledge; say so in the explanation.",
     "If the evidence conflicts, pick the best-supported answer and lower the confidence.",
+    "Keep the question-and-answer format: never merge two questions, never drop the option letters.",
   ].join(" ");
+
+  // One AI call that re-reads the raw OCR of a settled screen and returns the
+  // clean question/answer structure ("improve the identification logic"):
+  // stem with corrected OCR, options list, detected number, marks. Used when
+  // the heuristic parse looks garbled or an exam-format profile matched.
+  async function aiStructure(text: string): Promise<{ num: number | null; stem: string; options: string[] } | null> {
+    if (!aiReady()) return null;
+    try {
+      const raw = await ask([
+        "You receive raw OCR text captured from one screen of an online exam.",
+        "Extract exactly one exam question from it, fixing obvious OCR mistakes (l I 1 O 0 confusion, stray characters).",
+        "Reply in strict JSON only: {\"num\": <question number or null>, \"stem\": \"the question text\", \"options\": [\"A. ...\",\"B. ...\",...]} .",
+        "Options keep their letter prefix. If there are no options, return an empty array. Ignore UI noise (buttons, timers, headers).",
+      ].join(" "), `<screen>\n${text.slice(0, 3000)}\n</screen>`, 700);
+      const j = extractJson(raw);
+      if (!j || typeof j.stem !== "string" || !j.stem.trim()) return null;
+      const options = Array.isArray(j.options)
+        ? j.options.map((o) => line(o, 400)).filter(Boolean).slice(0, 8)
+        : [];
+      const num = Number.isFinite(Number(j.num)) && Number(j.num) > 0 ? Number(j.num) : null;
+      return { num, stem: multi(j.stem, MAX_TEXT), options };
+    } catch { return null; }
+  }
+
+  // Heuristic vs AI structure: prefer the AI result when it found options the
+  // regex missed or cleaned the stem meaningfully; otherwise keep heuristics.
+  async function structureScreen(text: string, fmts = formats) {
+    const pq = parseQuestion(text, fmts);
+    const weak = pq.options.length === 0 && !pq.num;
+    if (aiReady() && (weak || fmts.length)) {
+      const ai = await aiStructure(text);
+      if (ai) {
+        const opts = ai.options.length >= pq.options.length ? ai.options : pq.options;
+        return { num: ai.num ?? pq.num, stem: ai.stem || pq.stem, options: opts, formatId: pq.formatId };
+      }
+    }
+    return pq;
+  }
+
+  // --- Qwen routing ---------------------------------------------------------
+  // When an Anthropic key is configured the engine speaks Claude natively.
+  // Otherwise any OpenAI-compatible gateway can be used — including Alibaba
+  // Qwen: set WATCHER_LLM_URL to https://dashscope.aliyuncs.com/compatible-mode/v1
+  // and WATCHER_LLM_KEY to the DashScope key; then Qwen model ids such as
+  // "qwen-plus" or "qwen-max" work directly in Inspect Buddy settings.
+  const isQwenModel = (m: string) => /^qwen[a-z0-9.-]*$/i.test(m);
+  const dashscopeUrl = () => process.env["DASHSCOPE_BASE_URL"]
+    ?? "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
+  async function askQwen(system: string, user: string, maxTokens: number) {
+    const k = process.env["DASHSCOPE_API_KEY"];
+    if (!k) throw new WatcherError(400, "No Qwen API key configured (set DASHSCOPE_API_KEY on the relay).");
+    const res = await fetch(`${dashscopeUrl().replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${k}` },
+      body: JSON.stringify({
+        model: isQwenModel(settings.model) ? settings.model : "qwen-plus",
+        max_tokens: maxTokens, temperature: 0.2,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+    if (!res.ok) throw new WatcherError(502, `Qwen provider responded ${res.status}`);
+    const j = await res.json() as { choices?: { message?: { content?: string } }[] };
+    return String(j.choices?.[0]?.message?.content ?? "").trim();
+  }
 
   async function researchOne(w: WatcherWatch, q: WatcherQuestion) {
     // 1) Repository research, by category-relevance across all docs.
@@ -945,12 +1146,16 @@ function mergeSettings(stored: Partial<WatcherSettings>): WatcherSettings {
   const bool = (v: unknown, d: boolean) => (typeof v === "boolean" ? v : d);
   const model = String(stored.model ?? "").trim();
   const maxQ = Number(stored.maxQuestions);
+  const live = Number(stored.liveShots);
   return {
     enabled: bool(stored.enabled, DEFAULT_WATCHER_SETTINGS.enabled),
     ai: bool(stored.ai, DEFAULT_WATCHER_SETTINGS.ai),
     webSearch: bool(stored.webSearch, DEFAULT_WATCHER_SETTINGS.webSearch),
-    model: /^claude-[a-z0-9.-]{3,60}$/.test(model) ? model : DEFAULT_MODEL,
+    // Accept Claude model ids as-is; for OpenAI-compatible gateways (Qwen on
+    // DashScope/compatible-mode, or any other) allow their model names too.
+    model: /^claude-[a-z0-9.-]{3,60}$/.test(model) || /^[A-Za-z0-9][A-Za-z0-9._:/-]{2,80}$/.test(model) ? model : DEFAULT_MODEL,
     maxQuestions: Number.isFinite(maxQ) ? Math.min(MAX_QUESTIONS, Math.max(5, Math.round(maxQ))) : DEFAULT_WATCHER_SETTINGS.maxQuestions,
+    liveShots: Number.isFinite(live) ? Math.min(MAX_SHOTS, Math.max(1, Math.round(live))) : DEFAULT_WATCHER_SETTINGS.liveShots,
     updatedAt: Number(stored.updatedAt) || 0,
   };
 }
