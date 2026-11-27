@@ -28822,6 +28822,30 @@ var require_logger = __commonJS({
   }
 });
 
+// src/lib/logger.ts
+var import_pino, isProduction, logger;
+var init_logger = __esm({
+  "src/lib/logger.ts"() {
+    "use strict";
+    import_pino = __toESM(require_pino(), 1);
+    isProduction = process.env.NODE_ENV === "production";
+    logger = (0, import_pino.default)({
+      level: process.env.LOG_LEVEL ?? "info",
+      redact: [
+        "req.headers.authorization",
+        "req.headers.cookie",
+        "res.headers['set-cookie']"
+      ],
+      ...isProduction ? {} : {
+        transport: {
+          target: "pino-pretty",
+          options: { colorize: true }
+        }
+      }
+    });
+  }
+});
+
 // ../../node_modules/.pnpm/postgres-array@2.0.0/node_modules/postgres-array/index.js
 var require_postgres_array = __commonJS({
   "../../node_modules/.pnpm/postgres-array@2.0.0/node_modules/postgres-array/index.js"(exports) {
@@ -34165,6 +34189,37 @@ var init_esm = __esm({
     TypeOverrides = import_lib.default.TypeOverrides;
     defaults = import_lib.default.defaults;
     esm_default = import_lib.default;
+  }
+});
+
+// src/lib/pgpool.ts
+var pgpool_exports = {};
+__export(pgpool_exports, {
+  createPgPool: () => createPgPool
+});
+function createPgPool(url) {
+  return Promise.resolve().then(() => (init_esm(), esm_exports)).then(({ default: pg2 }) => {
+    const pool = new pg2.Pool({
+      connectionString: url,
+      max: 2,
+      connectionTimeoutMillis: 5e3,
+      statement_timeout: 1e4,
+      query_timeout: 1e4,
+      idleTimeoutMillis: 3e4,
+      keepAlive: true
+    });
+    pool.on("error", (err) => {
+      logger.error({ err }, "Postgres pool client errored while idle; the store will fall back or retry");
+    });
+    pool.on("connect", () => {
+    });
+    return pool;
+  });
+}
+var init_pgpool = __esm({
+  "src/lib/pgpool.ts"() {
+    "use strict";
+    init_logger();
   }
 });
 
@@ -72352,8 +72407,8 @@ function fileBackend(dir) {
   };
 }
 async function postgresBackend(url) {
-  const { default: pg2 } = await Promise.resolve().then(() => (init_esm(), esm_exports));
-  const pool = new pg2.Pool({ connectionString: url, max: 2 });
+  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     describe: "PostgreSQL (DATABASE_URL)",
@@ -72628,8 +72683,8 @@ function fileBillingBackend(dir) {
   };
 }
 async function postgresBillingBackend(url) {
-  const { default: pg2 } = await Promise.resolve().then(() => (init_esm(), esm_exports));
-  const pool = new pg2.Pool({ connectionString: url, max: 2 });
+  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     describe: "PostgreSQL (DATABASE_URL)",
@@ -73233,8 +73288,8 @@ function fileSiteBackend(dir) {
   };
 }
 async function postgresSiteBackend(url) {
-  const { default: pg2 } = await Promise.resolve().then(() => (init_esm(), esm_exports));
-  const pool = new pg2.Pool({ connectionString: url, max: 2 });
+  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     describe: "PostgreSQL (DATABASE_URL)",
@@ -73528,8 +73583,8 @@ function fileBuddyBackend(dir) {
   };
 }
 async function postgresBuddyBackend(url) {
-  const { default: pg2 } = await Promise.resolve().then(() => (init_esm(), esm_exports));
-  const pool = new pg2.Pool({ connectionString: url, max: 2 });
+  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     async load() {
@@ -74055,7 +74110,7 @@ function aiError(err) {
 
 // src/lib/watcher.ts
 init_sdk();
-import { randomBytes as randomBytes6 } from "node:crypto";
+import { createHash as createHash2, randomBytes as randomBytes6 } from "node:crypto";
 import { mkdir as mkdir6, readFile as readFile6, rename as rename5, unlink, writeFile as writeFile5 } from "node:fs/promises";
 import path8 from "node:path";
 var WatcherError = class extends Error {
@@ -74071,6 +74126,7 @@ var MAX_SHOTS = 40;
 var MAX_TEXT2 = 6e3;
 var MAX_DOCS = 500;
 var MAX_DOC_BYTES = 8 * 1024 * 1024;
+var LIVE_SHOTS = 3;
 var DEFAULT_MODEL2 = "claude-opus-5-5";
 var DEFAULT_WATCHER_SETTINGS = {
   enabled: true,
@@ -74078,6 +74134,7 @@ var DEFAULT_WATCHER_SETTINGS = {
   webSearch: true,
   model: DEFAULT_MODEL2,
   maxQuestions: 60,
+  liveShots: LIVE_SHOTS,
   updatedAt: 0
 };
 function fileWatcherBackend(dir) {
@@ -74109,12 +74166,19 @@ function fileWatcherBackend(dir) {
       } catch {
       }
     },
+    async readImage(name) {
+      try {
+        return await readFile6(path8.join(imgDir, path8.basename(name)));
+      } catch {
+        return void 0;
+      }
+    },
     imageUrl: (name) => `/api/watcher/img/${encodeURIComponent(name)}`
   };
 }
 async function postgresWatcherBackend(url) {
-  const { default: pg2 } = await Promise.resolve().then(() => (init_esm(), esm_exports));
-  const pool = new pg2.Pool({ connectionString: url, max: 2 });
+  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     async load() {
@@ -74180,27 +74244,52 @@ function detectExamStart2(text) {
   }
   return { hits, score, exam: score >= 3 || score >= 2 && questionShape(text) };
 }
-function parseQuestion(text) {
+var safeRe = (src, flags = "") => {
+  if (!src) return null;
+  try {
+    return new RegExp(src, flags);
+  } catch {
+    return null;
+  }
+};
+function parseQuestion(text, formats = []) {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  let best;
+  let bestHits = 0;
+  for (const f of formats) {
+    let hits = 0;
+    if (safeRe(f.patterns.question)?.test(text)) hits += 2;
+    if (safeRe(f.patterns.option)?.test(text)) hits += 1;
+    if (safeRe(f.patterns.marks)?.test(text)) hits += 1;
+    if (hits > bestHits) {
+      best = f;
+      bestHits = hits;
+    }
+  }
+  const qRe = best ? safeRe(best.patterns.question, "i") : null;
+  const oRe = best ? safeRe(best.patterns.option, "i") : null;
   let num = null;
   const stem = [];
   const options = [];
   for (const l of lines) {
-    const om = l.match(OPTION_LINE);
+    const om = oRe && l.match(oRe) || l.match(OPTION_LINE);
     if (om) {
-      options.push(`${om[1].toUpperCase()}. ${om[2]}`);
+      const marker = (om[1] ?? "").toString();
+      const body = (om[2] ?? "").toString();
+      const letter = /^[a-dA-D]$/.test(marker) ? marker.toUpperCase() : String.fromCharCode(65 + options.length);
+      options.push(`${letter}. ${body.replace(/^[).:\-\u2022\s]+/, "").trim()}`.slice(0, 400));
       continue;
     }
-    const nm = stem.length === 0 && !num ? l.match(QUESTION_NUM) : null;
+    const nm = stem.length === 0 && !num ? (qRe ? l.match(qRe) : null) ?? (stem.length === 0 && !num ? l.match(QUESTION_NUM) : null) : null;
     if (nm) {
       num = Number(nm[1]);
-      const rest = l.replace(QUESTION_NUM, "").trim();
+      const rest = l.slice((nm.index ?? 0) + nm[0].length).trim();
       if (rest) stem.push(rest);
       continue;
     }
     stem.push(l);
   }
-  return { num, stem: stem.join("\n").slice(0, MAX_TEXT2), options };
+  return { num, stem: stem.join("\n").slice(0, MAX_TEXT2), options, formatId: best?.id };
 }
 var WORD = /[a-z0-9][a-z0-9'-]{2,}/g;
 var STOP = /* @__PURE__ */ new Set(["the", "and", "for", "with", "that", "this", "what", "which", "from", "have", "has", "are", "was", "were", "will", "would", "can", "could", "about", "into", "your", "you", "not", "but", "its", "itself", "they", "them", "their", "there", "when", "where", "who", "how", "why", "does", "did", "done", "some", "most", "more", "than", "then", "also", "only", "just", "over", "under", "out", "off", "all", "any", "each", "other", "such"]);
@@ -74290,9 +74379,10 @@ function createWatcherEngine(backend, options = {}) {
   let apiKey = "";
   const watches = [];
   const docs = [];
+  const formats = [];
   let writing = Promise.resolve();
   let timer;
-  const snapshot = () => ({ settings, apiKey: apiKey || void 0, watches, docs });
+  const snapshot = () => ({ settings, apiKey: apiKey || void 0, watches, docs, formats });
   const persistNow = () => {
     if (timer) {
       clearTimeout(timer);
@@ -74323,6 +74413,7 @@ function createWatcherEngine(backend, options = {}) {
       apiKey = typeof loaded?.apiKey === "string" ? loaded.apiKey : "";
       if (Array.isArray(loaded?.watches)) watches.push(...loaded.watches);
       if (Array.isArray(loaded?.docs)) docs.push(...loaded.docs);
+      if (Array.isArray(loaded?.formats)) formats.push(...loaded.formats);
     } catch (err) {
       console.warn("Inspect Buddy: watcher state is malformed, starting empty", err);
     }
@@ -74337,26 +74428,37 @@ function createWatcherEngine(backend, options = {}) {
     if (client?.key !== k) client = { key: k, client: new Anthropic({ apiKey: k, timeout: 6e4, maxRetries: 1 }) };
     return client.client;
   };
-  async function askOpenCompatible(system, user, maxTokens) {
+  let usage = { in: 0, out: 0 };
+  const addUsage = (i, o) => {
+    usage.in += i ?? 0;
+    usage.out += o ?? 0;
+  };
+  async function askOpenCompatible(system, user, maxTokens, image) {
     const url = process.env["WATCHER_LLM_URL"];
     const k = process.env["WATCHER_LLM_KEY"];
     if (!url || !k) throw new WatcherError(400, "No AI provider configured.");
+    const model = settings.model && !settings.model.startsWith("claude-") ? settings.model : "gpt-4o-mini";
+    const content = image ? [{ type: "text", text: user }, { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image.toString("base64")}` } }] : user;
     const res = await fetch(url.replace(/\/$/, "") + "/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${k}` },
       body: JSON.stringify({
-        model: settings.model && !settings.model.startsWith("claude-") ? settings.model : "gpt-4o-mini",
+        model,
         max_tokens: maxTokens,
         temperature: 0.2,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }]
+        messages: [{ role: "system", content: system }, { role: "user", content }]
       }),
-      signal: AbortSignal.timeout(45e3)
+      signal: AbortSignal.timeout(6e4)
     });
     if (!res.ok) throw new WatcherError(502, `LLM provider responded ${res.status}`);
     const j = await res.json();
+    addUsage(j.usage?.prompt_tokens, j.usage?.completion_tokens);
     return String(j.choices?.[0]?.message?.content ?? "").trim();
   }
   async function ask(system, user, maxTokens) {
+    if (!key() && isQwenModel(settings.model) && process.env["DASHSCOPE_API_KEY"]) {
+      return askQwen(system, user, maxTokens);
+    }
     if (!key()) return askOpenCompatible(system, user, maxTokens);
     const response = await anthropic().beta.messages.create({
       model: settings.model || DEFAULT_MODEL2,
@@ -74367,11 +74469,43 @@ function createWatcherEngine(backend, options = {}) {
       fallbacks: "default",
       messages: [{ role: "user", content: user }]
     });
+    const u = response.usage;
+    addUsage(u?.input_tokens, u?.output_tokens);
     if (response.stop_reason === "refusal") return "";
     return response.content.flatMap((b) => b.type === "text" ? [b.text] : []).join("\n").trim();
   }
+  async function askVision(system, user, image, maxTokens = 900) {
+    if (image && key()) {
+      const response = await anthropic().beta.messages.create({
+        model: settings.model || DEFAULT_MODEL2,
+        max_tokens: maxTokens,
+        system,
+        output_config: { effort: "low" },
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: "default",
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: "image/jpeg", data: image.toString("base64") } },
+          { type: "text", text: user }
+        ] }]
+      });
+      const u = response.usage;
+      addUsage(u?.input_tokens, u?.output_tokens);
+      if (response.stop_reason === "refusal") return "";
+      return response.content.flatMap((b) => b.type === "text" ? [b.text] : []).join("\n").trim();
+    }
+    return ask(system, user, maxTokens);
+  }
+  async function loadImage(name) {
+    if (!name) return void 0;
+    try {
+      const b = backend;
+      return b.readImage ? await b.readImage(name) : void 0;
+    } catch {
+      return void 0;
+    }
+  }
   const find = (sessionId) => watches.find((w) => w.sessionId === sessionId);
-  function addQuestion(w, body, options2, image, shotId) {
+  function addQuestion(w, body, options2, image, shotId, formatId) {
     const cap = Math.min(MAX_QUESTIONS, settings.maxQuestions);
     const linkShot = (n) => {
       if (shotId) {
@@ -74394,7 +74528,8 @@ function createWatcherEngine(backend, options = {}) {
         source: "",
         refs: [],
         confidence: 0,
-        correctedBy: ""
+        correctedBy: "",
+        formatId: formatId || void 0
       };
       w.questions.push(q);
       w.lastSeen = body;
@@ -74421,12 +74556,65 @@ function createWatcherEngine(backend, options = {}) {
     "If the screen shows ordinary desktop work, browsers, chats or error dialogs, exam is false."
   ].join(" ");
   const ANSWER_SYSTEM = [
-    "You prepare reading material for a proctored training review: given one exam question captured from a screen, plus research findings from the team's document repository and (optionally) online sources,",
+    "You prepare reading material for a proctored training review: given one exam question captured from a screen (OCR text may contain small recognition errors \u2014 interpret it charitably), plus research findings from the team's document repository and (optionally) online sources,",
     "produce the best-supported answer. Reply in strict JSON only:",
-    '{"answer": "the answer, option letter + text for MCQ", "explanation": "1-3 sentences citing which evidence supports it", "source": "repo|online|ai", "confidence": 0..1}.',
+    '{"answer": "the answer, option letter + full option text for MCQ", "explanation": "1-3 sentences citing which evidence supports it", "source": "repo|online|ai", "confidence": 0..1}.',
     "Prefer repository evidence over online evidence over your own knowledge; say so in the explanation.",
-    "If the evidence conflicts, pick the best-supported answer and lower the confidence."
+    "If the evidence conflicts, pick the best-supported answer and lower the confidence.",
+    "Keep the question-and-answer format: never merge two questions, never drop the option letters."
   ].join(" ");
+  async function aiStructure(text) {
+    if (!aiReady()) return null;
+    try {
+      const raw2 = await ask([
+        "You receive raw OCR text captured from one screen of an online exam.",
+        "Extract exactly one exam question from it, fixing obvious OCR mistakes (l I 1 O 0 confusion, stray characters).",
+        'Reply in strict JSON only: {"num": <question number or null>, "stem": "the question text", "options": ["A. ...","B. ...",...]} .',
+        "Options keep their letter prefix. If there are no options, return an empty array. Ignore UI noise (buttons, timers, headers)."
+      ].join(" "), `<screen>
+${text.slice(0, 3e3)}
+</screen>`, 700);
+      const j = extractJson(raw2);
+      if (!j || typeof j.stem !== "string" || !j.stem.trim()) return null;
+      const options2 = Array.isArray(j.options) ? j.options.map((o) => line3(o, 400)).filter(Boolean).slice(0, 8) : [];
+      const num = Number.isFinite(Number(j.num)) && Number(j.num) > 0 ? Number(j.num) : null;
+      return { num, stem: multi3(j.stem, MAX_TEXT2), options: options2 };
+    } catch {
+      return null;
+    }
+  }
+  async function structureScreen(text, fmts = formats) {
+    const pq = parseQuestion(text, fmts);
+    const weak = pq.options.length === 0 && !pq.num;
+    if (aiReady() && (weak || fmts.length)) {
+      const ai = await aiStructure(text);
+      if (ai) {
+        const opts = ai.options.length >= pq.options.length ? ai.options : pq.options;
+        return { num: ai.num ?? pq.num, stem: ai.stem || pq.stem, options: opts, formatId: pq.formatId };
+      }
+    }
+    return pq;
+  }
+  const isQwenModel = (m) => /^qwen[a-z0-9.-]*$/i.test(m);
+  const dashscopeUrl = () => process.env["DASHSCOPE_BASE_URL"] ?? "https://dashscope.aliyuncs.com/compatible-mode/v1";
+  async function askQwen(system, user, maxTokens) {
+    const k = process.env["DASHSCOPE_API_KEY"];
+    if (!k) throw new WatcherError(400, "No Qwen API key configured (set DASHSCOPE_API_KEY on the relay).");
+    const res = await fetch(`${dashscopeUrl().replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${k}` },
+      body: JSON.stringify({
+        model: isQwenModel(settings.model) ? settings.model : "qwen-plus",
+        max_tokens: maxTokens,
+        temperature: 0.2,
+        messages: [{ role: "system", content: system }, { role: "user", content: user }]
+      }),
+      signal: AbortSignal.timeout(45e3)
+    });
+    if (!res.ok) throw new WatcherError(502, `Qwen provider responded ${res.status}`);
+    const j = await res.json();
+    return String(j.choices?.[0]?.message?.content ?? "").trim();
+  }
   async function researchOne(w, q) {
     const ranked = docs.map((d) => ({ d, s: scoreDoc(q.text, d) })).filter((x) => x.s >= 0.18).sort((a, b) => b.s - a.s).slice(0, 3);
     const repoEvidence = ranked.map(({ d, s }) => `REPO[${d.category}] ${d.title} (score ${s.toFixed(2)}): ${snippet(d, q.text)}`).join("\n");
@@ -74485,6 +74673,108 @@ ${evidence || "No local or online evidence found."}
     }
     q.status = "pending";
     q.explanation = "No answer found in the repository or online. An admin should answer this manually.";
+  }
+  const EXTRACT_SYSTEM = [
+    "You extract exam questions from screenshots of an online quiz.",
+    "Copy the question text VERBATIM (fix only obvious OCR errors). Keep every option with the letter shown on screen; assign A, B, C\u2026 if none are labelled.",
+    "IGNORE UI elements: buttons (Save, Note, Submit, Next), tags, progress bars, timers, headers, watermarks.",
+    "Detect 'select two' / 'choose all that apply' as multiple_choice_multi_select; true/false statements as true_false.",
+    "Reply in strict JSON only:",
+    `{"question_number": "e.g. 3 or '3 of 10' or null", "question_type": "single_choice|multiple_choice_multi_select|true_false|other", "question": "...", "options": [{"label":"A","text":"..."}]}`
+  ].join(" ");
+  const ANSWER_LABELS_SYSTEM = [
+    "You answer one multiple-choice quiz question from its text and options only (the image is not shown, to save tokens).",
+    "Pick the correct option label(s). For multi-select questions return every correct label.",
+    "Prefer repository evidence over online evidence over your own knowledge; say so briefly.",
+    "Reply in strict JSON only:",
+    '{"correct_labels": ["A"], "explanation": "1-2 sentences", "confidence": "high|medium|low"}'
+  ].join(" ");
+  const CONFIDENCE_VALUE = { high: 0.9, medium: 0.65, low: 0.4 };
+  async function runShotPipeline(w, shotId) {
+    const shot = w.shots.find((s) => s.id === shotId);
+    if (!shot || shot.ignored) return;
+    const setStage = (stage, error2) => {
+      shot.pipeline = { ...shot.pipeline ?? {}, stage, at: clock(), ...error2 ? { error: error2 } : {} };
+      persistSoon();
+    };
+    let q = shot.questionIndex != null ? w.questions.find((x) => x.n === shot.questionIndex) : void 0;
+    setStage("extracting");
+    let extracted = null;
+    try {
+      const img = await loadImage(shot.image);
+      const raw2 = aiReady() ? await askVision(EXTRACT_SYSTEM, `<ocr-text>
+${(shot.text || "").slice(0, 2500)}
+</ocr-text>`, img) : "";
+      const j = extractJson(raw2);
+      if (j && typeof j.question === "string" && j.question.trim()) {
+        const opts = Array.isArray(j.options) ? j.options.slice(0, 8).map((o, i) => ({
+          label: line3(o?.label, 4).toUpperCase() || String.fromCharCode(65 + i),
+          text: line3(o?.text, 400)
+        })).filter((o) => o.text) : [];
+        const nnum = Number(String(j.question_number ?? "").match(/\d+/)?.[0]);
+        extracted = {
+          num: Number.isFinite(nnum) && nnum > 0 ? nnum : null,
+          type: ["single_choice", "multiple_choice_multi_select", "true_false", "other"].includes(String(j.question_type)) ? String(j.question_type) : "other",
+          stem: multi3(j.question, MAX_TEXT2),
+          options: opts
+        };
+      }
+    } catch (err) {
+      shot.pipeline = { ...shot.pipeline ?? { stage: "failed" }, stage: "failed", error: err.message?.slice(0, 200) };
+    }
+    if (!extracted) {
+      const st = await structureScreen(shot.text || "");
+      if (st.stem || st.options.length) {
+        extracted = {
+          num: st.num,
+          type: st.options.length >= 2 ? "single_choice" : "other",
+          stem: st.stem || shot.text || "",
+          options: st.options.map((o, i) => {
+            const m = o.match(/^([A-Z])[).\s]\s*(.*)$/);
+            return { label: m ? m[1] : String.fromCharCode(65 + i), text: (m ? m[2] : o).slice(0, 400) };
+          })
+        };
+      }
+    }
+    if (!extracted || !extracted.stem.trim()) {
+      setStage("failed", "No question could be extracted from this screen.");
+      return;
+    }
+    const optLines = extracted.options.map((o) => `${o.label}. ${o.text}`);
+    if (!q) {
+      q = addQuestion(w, extracted.stem, optLines, shot.image, shot.id) ?? void 0;
+      if (!q) {
+        const dup = w.questions.find((x) => x.n === shot.questionIndex) ?? w.questions.at(-1);
+        if (dup) {
+          q = dup;
+          if (optLines.length > (dup.options?.length ?? 0)) dup.options = optLines;
+        }
+      }
+    }
+    if (!q) {
+      setStage("failed", "The question list is full.");
+      return;
+    }
+    shot.questionIndex = q.n;
+    q.questionType = extracted.type;
+    q.questionNumber = extracted.num ?? void 0;
+    q.extracted = { question: extracted.stem, options: extracted.options, type: extracted.type };
+    setStage("extracted");
+    setStage("answering");
+    try {
+      await researchOne(w, q);
+      if (q.status === "answered" && q.extracted?.options.length) {
+        const labels = q.answer.toUpperCase().match(/\b[A-D]\b/g) ?? [];
+        if (labels.length) q.correctLabels = [...new Set(labels)];
+        const hit = q.extracted.options.filter((o) => q.correctLabels?.includes(o.label));
+        if (hit.length) q.answer = hit.map((o) => `${o.label}. ${o.text}`).join(" \xB7 ").slice(0, 500);
+      }
+      shot.pipeline = { ...shot.pipeline, stage: "answered", at: clock(), model: settings.model, tokensIn: usage.in, tokensOut: usage.out };
+    } catch (err) {
+      setStage("failed", err.message?.slice(0, 200) ?? "answer research failed");
+      return;
+    }
+    persistSoon();
   }
   async function finalize2(w, reason) {
     w.phase = "completed";
@@ -74605,7 +74895,9 @@ ${q.options.map((o) => `- ${o}`).join("\n")}` : ""}`)
       const now = clock();
       w.updatedAt = now;
       let imageName;
+      let imageHash;
       if (image && image.length > 100 && image.length <= MAX_DOC_BYTES && backend.saveImage) {
+        imageHash = createHash2("sha256").update(image).digest("hex");
         imageName = `${sessionId}-${now}.jpg`;
         try {
           await backend.saveImage(imageName, image);
@@ -74613,19 +74905,31 @@ ${q.options.map((o) => `- ${o}`).join("\n")}` : ""}`)
           imageName = void 0;
         }
       }
+      const dupHash = imageHash && w.shots.some((s) => s.hash === imageHash && !s.ignored) ? imageHash : void 0;
       if (imageName || text) {
         const last = w.shots.at(-1);
-        const sameScreen = !!last && !!imageName === !!last.image && (!text || !last.text || simWords(last.text, text) >= 0.9);
+        const sameScreen = !!last && !last.ignored && !!imageName === !!last.image && (!dupHash || last.hash === dupHash) && (!text || !last.text || simWords(last.text, text) >= 0.9);
         if (sameScreen && last) {
           last.at = now;
           if (imageName) {
-            if (last.image) void backend.removeImage?.(last.image).catch?.(() => {
+            if (last.image && last.image !== imageName) void backend.removeImage?.(last.image).catch?.(() => {
             });
             last.image = imageName;
+            if (imageHash) last.hash = imageHash;
           }
           if (text) last.text = text;
+        } else if (dupHash) {
+          const prev = w.shots.find((s) => s.hash === dupHash && !s.ignored);
+          if (prev) {
+            prev.at = now;
+            if (text && text.length > prev.text.length) prev.text = text.slice(0, MAX_TEXT2);
+          }
         } else {
-          w.shots.push({ id: newId2(), at: now, image: imageName, text: text.slice(0, MAX_TEXT2) });
+          w.shots.push({ id: newId2(), at: now, image: imageName, text: text.slice(0, MAX_TEXT2), hash: imageHash, pipeline: { stage: "queued", at: now } });
+          if (imageHash) {
+            (w.shotHashes ??= []).push(imageHash);
+            if (w.shotHashes.length > MAX_SHOTS) w.shotHashes.shift();
+          }
           if (w.shots.length > MAX_SHOTS) {
             const dropped = w.shots.shift();
             if (dropped.image) void backend.removeImage?.(dropped.image).catch?.(() => {
@@ -74697,23 +75001,29 @@ ${text.slice(0, 2500)}
       if (w.phase === "completed") throw new WatcherError(409, "This watch is already completed.");
       const shot = w.shots.find((s) => s.id === shotId);
       if (!shot) throw new WatcherError(404, "That screenshot is no longer in the strip.");
-      if (shot.questionIndex && w.questions.some((q2) => q2.n === shot.questionIndex)) {
-        const q2 = w.questions.find((x) => x.n === shot.questionIndex);
-        await api.reResearch(sessionId, q2.n);
-        return { ...q2 };
-      }
-      const pq = parseQuestion(shot.text || "");
-      const body = (pq.stem || shot.text || "").slice(0, MAX_TEXT2);
-      if (!body.trim()) throw new WatcherError(409, "No readable text was found on that screen.");
+      if (shot.ignored) throw new WatcherError(409, "This screenshot is ignored; un-ignore it first.");
       w.phase = "in-exam";
       if (!w.examTitle) w.examTitle = "Exam (from screenshot)";
       w.updatedAt = clock();
-      addQuestion(w, body, pq.options, shot.image, shot.id);
+      await runShotPipeline(w, shotId);
       await persistNow();
       const linked = w.shots.find((s) => s.id === shotId)?.questionIndex;
       const q = w.questions.find((x) => x.n === linked);
-      if (q) await api.reResearch(sessionId, q.n);
       return { ...q ?? { n: 0 } };
+    },
+    // Ignore / restore one screenshot: an ignored screen drops out of the live
+    // strip and the archive, its extracted question stays untouched unless the
+    // admin deletes it separately. Ignored shots are never auto-analysed or
+    // matched as duplicates.
+    async ignoreShot(sessionId, shotId, ignored = true) {
+      const w = find(sessionId);
+      if (!w) throw new WatcherError(404, "No question watcher for that session.");
+      const shot = w.shots.find((s) => s.id === shotId);
+      if (!shot) throw new WatcherError(404, "That screenshot is no longer in the strip.");
+      shot.ignored = ignored;
+      w.updatedAt = clock();
+      await persistNow();
+      return { id: shot.id, ignored };
     },
     // Admin accepts or corrects a recommended answer.
     async review(sessionId, n, input) {
@@ -74845,12 +75155,16 @@ function mergeSettings3(stored) {
   const bool2 = (v, d) => typeof v === "boolean" ? v : d;
   const model = String(stored.model ?? "").trim();
   const maxQ = Number(stored.maxQuestions);
+  const live = Number(stored.liveShots);
   return {
     enabled: bool2(stored.enabled, DEFAULT_WATCHER_SETTINGS.enabled),
     ai: bool2(stored.ai, DEFAULT_WATCHER_SETTINGS.ai),
     webSearch: bool2(stored.webSearch, DEFAULT_WATCHER_SETTINGS.webSearch),
-    model: /^claude-[a-z0-9.-]{3,60}$/.test(model) ? model : DEFAULT_MODEL2,
+    // Accept Claude model ids as-is; for OpenAI-compatible gateways (Qwen on
+    // DashScope/compatible-mode, or any other) allow their model names too.
+    model: /^claude-[a-z0-9.-]{3,60}$/.test(model) || /^[A-Za-z0-9][A-Za-z0-9._:/-]{2,80}$/.test(model) ? model : DEFAULT_MODEL2,
     maxQuestions: Number.isFinite(maxQ) ? Math.min(MAX_QUESTIONS, Math.max(5, Math.round(maxQ))) : DEFAULT_WATCHER_SETTINGS.maxQuestions,
+    liveShots: Number.isFinite(live) ? Math.min(MAX_SHOTS, Math.max(1, Math.round(live))) : DEFAULT_WATCHER_SETTINGS.liveShots,
     updatedAt: Number(stored.updatedAt) || 0
   };
 }
@@ -74938,8 +75252,8 @@ function fileLinkLogBackend(dir) {
   };
 }
 async function postgresLinkLogBackend(url) {
-  const { default: pg2 } = await Promise.resolve().then(() => (init_esm(), esm_exports));
-  const pool = new pg2.Pool({ connectionString: url, max: 2 });
+  const { createPgPool: createPgPool2 } = await Promise.resolve().then(() => (init_pgpool(), pgpool_exports));
+  const pool = await createPgPool2(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     async load() {
@@ -75021,25 +75335,8 @@ async function createLinkLog(backend) {
   };
 }
 
-// src/lib/logger.ts
-var import_pino = __toESM(require_pino(), 1);
-var isProduction = process.env.NODE_ENV === "production";
-var logger = (0, import_pino.default)({
-  level: process.env.LOG_LEVEL ?? "info",
-  redact: [
-    "req.headers.authorization",
-    "req.headers.cookie",
-    "res.headers['set-cookie']"
-  ],
-  ...isProduction ? {} : {
-    transport: {
-      target: "pino-pretty",
-      options: { colorize: true }
-    }
-  }
-});
-
 // src/lib/portal.ts
+init_logger();
 var store = createMsfwrStore(Date.now, {
   onLive(session) {
     const ra = session.operator?.raId ?? session.ra;
@@ -75110,7 +75407,12 @@ async function open2() {
   const url = process.env["DATABASE_URL"];
   let backend;
   if (url) {
-    backend = await postgresBackend(url);
+    try {
+      backend = await postgresBackend(url);
+    } catch (err) {
+      console.warn("Accounts: store unavailable, falling back to file storage", err);
+      backend = fileBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+    }
   } else {
     const dir = process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data");
     backend = fileBackend(dir);
@@ -75139,8 +75441,19 @@ function accountsReady() {
   return opening;
 }
 async function openBilling() {
+  const dir = process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data");
   const url = process.env["DATABASE_URL"];
-  const backend = url ? await postgresBillingBackend(url) : fileBillingBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+  let backend;
+  if (url) {
+    try {
+      backend = await postgresBillingBackend(url);
+    } catch (err) {
+      console.warn("Billing: store unavailable, falling back to file storage", err);
+      backend = fileBillingBackend(dir);
+    }
+  } else {
+    backend = fileBillingBackend(dir);
+  }
   const secret = process.env["BILLING_SECRET"] || process.env["SESSION_SECRET"];
   const { init, api } = createBilling(backend, { secret });
   await init;
@@ -75157,7 +75470,17 @@ function billingReady() {
 }
 async function openLinkLog() {
   const url = process.env["DATABASE_URL"];
-  const backend = url ? await postgresLinkLogBackend(url) : fileLinkLogBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+  let backend;
+  if (url) {
+    try {
+      backend = await postgresLinkLogBackend(url);
+    } catch (err) {
+      console.warn("Link register: store unavailable, falling back to file storage", err);
+      backend = fileLinkLogBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+    }
+  } else {
+    backend = fileLinkLogBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+  }
   const log = await createLinkLog(backend);
   store.restoreClaims(log.activeClaims(Date.now()));
   return log;
@@ -75190,7 +75513,17 @@ async function linkRegister(filter = {}) {
 }
 async function openSite() {
   const url = process.env["DATABASE_URL"];
-  const backend = url ? await postgresSiteBackend(url) : fileSiteBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+  let backend;
+  if (url) {
+    try {
+      backend = await postgresSiteBackend(url);
+    } catch (err) {
+      console.warn("Site settings: store unavailable, falling back to file storage", err);
+      backend = fileSiteBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+    }
+  } else {
+    backend = fileSiteBackend(process.env["MSFWR_DATA_DIR"] || path10.resolve(process.cwd(), ".data"));
+  }
   const { init, api } = createSite(backend);
   await init;
   return api;
@@ -76144,7 +76477,7 @@ var auth_default = router3;
 
 // src/routes/admin.ts
 var import_express4 = __toESM(require_express2(), 1);
-import { createHash as createHash2, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
+import { createHash as createHash3, timingSafeEqual as timingSafeEqual4 } from "node:crypto";
 import fs5 from "node:fs";
 import path11 from "node:path";
 var router4 = (0, import_express4.Router)();
@@ -76154,7 +76487,7 @@ router4.use((_req, res, next) => {
 });
 router4.use(requireUser("admin"));
 var adminPinTries = limiter(5, 15 * 6e4);
-var digest = (v) => createHash2("sha256").update(v).digest();
+var digest = (v) => createHash3("sha256").update(v).digest();
 function adminPinOk(req, res) {
   const secret = (process.env["ADMIN_CREATION_PIN"] ?? "").trim();
   if (!/^\d{6}$/.test(secret)) {
@@ -76675,13 +77008,18 @@ function watcherView(w, imageUrl) {
       at: s.at,
       imageUrl: s.image && imageUrl ? imageUrl(s.image) : null,
       text: s.text.slice(0, 400),
-      questionIndex: s.questionIndex ?? null
+      questionIndex: s.questionIndex ?? null,
+      ignored: !!s.ignored,
+      // Two-stage AI flow status for the middle column of the control room.
+      pipeline: s.pipeline ?? null
     })),
     documentsStored: w.phase === "completed" ? w.storedDocs ?? [] : [],
     error: null,
     lastSeenText: w.lastSeen.slice(0, 300),
     examTitle: w.examTitle,
-    notes: w.notes
+    notes: w.notes,
+    // Newest N stay on the live strip; the rest go to the Archive tab.
+    liveShots: LIVE_SHOTS
   };
 }
 var imageUrlFor = (n) => `/api/admin/buddy/img/${encodeURIComponent(n)}`;
@@ -76795,6 +77133,20 @@ router4.post("/buddy/watchers/:id/shots/:shotId/analyse", async (req, res) => {
     invalidateEnrichCache("watcher-states");
     activity.add("inspect-buddy", `${req.account.displayName} analysed a screenshot`, req.account.username);
     res.json(reviewView(q, imageUrlFor));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+router4.post("/buddy/watchers/:id/shots/:shotId/ignore", async (req, res) => {
+  try {
+    const engine = await watcherReady();
+    if (!engine.watch(req.params.id)) await ensureWatch(req.params.id);
+    const wanted = req.body?.ignored;
+    const ignored = typeof wanted === "boolean" ? wanted : true;
+    const shot = await engine.ignoreShot(req.params.id, req.params.shotId, ignored);
+    invalidateEnrichCache("watcher-states");
+    activity.add("inspect-buddy", `${req.account.displayName} ${ignored ? "ignored" : "restored"} a screenshot`, req.account.username);
+    res.json(shot);
   } catch (err) {
     sendError(res, err);
   }
@@ -77278,6 +77630,7 @@ var billing_default = router5;
 
 // src/routes/site.ts
 var import_express6 = __toESM(require_express2(), 1);
+init_logger();
 var router6 = (0, import_express6.Router)();
 var KINDS2 = ["logo", "favicon", "og"];
 var perAddress = keyedLimiter(5, 60 * 6e4);
@@ -77588,6 +77941,7 @@ router9.use("/buddy", buddy_default);
 var routes_default = router9;
 
 // src/app.ts
+init_logger();
 var appDir = path12.dirname(fileURLToPath(import.meta.url));
 var frontendCandidates = [
   process.env.FRONTEND_DIST_DIR,
@@ -77637,6 +77991,7 @@ if (frontendDist) {
 var app_default = app;
 
 // src/index.ts
+init_logger();
 var rawPort = process.env["PORT"];
 if (!rawPort) {
   throw new Error(
@@ -77647,6 +78002,12 @@ var port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "Unhandled promise rejection; the relay keeps running");
+});
+process.on("uncaughtException", (err) => {
+  logger.error({ err }, "Uncaught exception; the relay keeps running");
+});
 app_default.listen(port, (err) => {
   if (err) {
     logger.error({ err }, "Error listening on port");

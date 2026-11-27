@@ -6,6 +6,7 @@ import { CreateUserBody, UpdateUserBody } from "@workspace/api-zod";
 import { formatRaId } from "../lib/msfwr";
 import { DAY } from "../lib/billing";
 import type { AssetKind } from "../lib/site";
+import { LIVE_SHOTS } from "../lib/watcher";
 import type { WatcherWatch, WatcherQuestion } from "../lib/watcher";
 import { accountsReady, activity, billingReady, buddyReady, limiter, linkRegister, requireUser, sendError, siteReady, store, watcherImageDir, watcherReady } from "../lib/portal";
 
@@ -514,7 +515,7 @@ function watcherView(w: WatcherWatch | undefined, imageUrl: ((name: string) => s
     examTitle: w.examTitle,
     notes: w.notes,
     // Newest N stay on the live strip; the rest go to the Archive tab.
-    liveShots: settings().liveShots,
+    liveShots: LIVE_SHOTS,
   };
 }
 

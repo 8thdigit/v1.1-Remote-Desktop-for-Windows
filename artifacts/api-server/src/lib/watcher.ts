@@ -227,8 +227,8 @@ export function fileWatcherBackend(dir: string): WatcherBackend {
 }
 
 export async function postgresWatcherBackend(url: string): Promise<WatcherBackend> {
-  const { default: pg } = await import("pg");
-  const pool = new pg.Pool({ connectionString: url, max: 2 });
+  const { createPgPool } = await import("./pgpool");
+  const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
   return {
     async load() {
@@ -948,7 +948,7 @@ export function createWatcherEngine(backend: WatcherBackend, options: { clock?: 
       }
     } catch (err) {
       // Vision extraction failed — fall back to the OCR-text structure below.
-      shot.pipeline = { ...(shot.pipeline ?? {}), error: (err as Error).message?.slice(0, 200) };
+      shot.pipeline = { ...(shot.pipeline ?? { stage: "failed" as ShotStage }), stage: "failed", error: (err as Error).message?.slice(0, 200) };
     }
     if (!extracted) {
       // Fallback: browser OCR text + heuristic/format/AI-text structure.
