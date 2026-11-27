@@ -126,6 +126,14 @@ on again. Uninstalling removes the key and the startup entry.
 
 Shares the primary display only. No file transfer, clipboard sync, audio,
 administrator elevation, or Windows sign-in/UAC control.
+Exam lockdown apps (Pearson VUE, Respondus LockDown Browser, and similar) run
+on a protected desktop that Windows isolates from normal programs: they block
+screen-capture APIs (captured windows render black) and move keyboard/mouse
+input to their own desktop. The host keeps streaming for up to 30 seconds of
+such a switch (brief prompts at exam start no longer drop the session), then
+ends it with "Windows switched to a locked or protected desktop". This is a
+Windows security boundary, not a bug — no remote-desktop tool can see or drive
+that desktop, and attempting to bypass an exam lockdown violates its terms.
 The relay terminates TLS and can read screen frames and control events. Use a
 relay you and your helper trust. It holds only the latest full frame, and the
 changed regions sent since it (at most 4 MB), in memory and
