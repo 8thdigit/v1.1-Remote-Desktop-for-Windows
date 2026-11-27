@@ -504,12 +504,17 @@ function watcherView(w: WatcherWatch | undefined, imageUrl: ((name: string) => s
       imageUrl: s.image && imageUrl ? imageUrl(s.image) : null,
       text: s.text.slice(0, 400),
       questionIndex: s.questionIndex ?? null,
+      ignored: !!s.ignored,
+      // Two-stage AI flow status for the middle column of the control room.
+      pipeline: s.pipeline ?? null,
     })),
     documentsStored: w.phase === "completed" ? w.storedDocs ?? [] : [],
     error: null,
     lastSeenText: w.lastSeen.slice(0, 300),
     examTitle: w.examTitle,
     notes: w.notes,
+    // Newest N stay on the live strip; the rest go to the Archive tab.
+    liveShots: settings().liveShots,
   };
 }
 
@@ -630,6 +635,22 @@ router.post("/buddy/watchers/:id/shots/:shotId/analyse", async (req, res) => {
     invalidateEnrichCache("watcher-states");
     activity.add("inspect-buddy", `${req.account!.displayName} analysed a screenshot`, req.account!.username);
     res.json(reviewView(q as never, imageUrlFor));
+  } catch (err) { sendError(res, err); }
+});
+
+// Ignore / restore one screenshot: an ignored screen drops out of the live
+// strip and the archive so it never becomes a question. Body (optional):
+// { "ignored": false } restores it. Default action is to ignore.
+router.post("/buddy/watchers/:id/shots/:shotId/ignore", async (req, res) => {
+  try {
+    const engine = await watcherReady();
+    if (!engine.watch(req.params.id)) await ensureWatch(req.params.id);
+    const wanted = (req.body as { ignored?: unknown } | undefined)?.ignored;
+    const ignored = typeof wanted === "boolean" ? wanted : true;
+    const shot = await engine.ignoreShot(req.params.id, req.params.shotId, ignored);
+    invalidateEnrichCache("watcher-states");
+    activity.add("inspect-buddy", `${req.account!.displayName} ${ignored ? "ignored" : "restored"} a screenshot`, req.account!.username);
+    res.json(shot);
   } catch (err) { sendError(res, err); }
 });
 
