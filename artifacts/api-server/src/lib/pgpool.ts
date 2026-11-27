@@ -36,3 +36,39 @@ export function createPgPool(url: string) {
     return pool as InstanceType<typeof pg.Pool>;
   });
 }
+
+// Wrap a Postgres-backed store's load/save so a dead or failing-over region
+// never turns into "Something went wrong on the relay" for every request:
+//   * load(): if the query fails, serve from the last snapshot we successfully
+//     read (or wrote); only the very first load with no snapshot can fail.
+//   * save(): if the write fails, keep the data in memory and retry it on the
+//     next save once the region recovers, instead of throwing at the user.
+export function withPgFallback<T>(
+  backend: { describe?: string; load(): Promise<T | undefined>; save(data: T): Promise<void> },
+): { describe?: string; load(): Promise<T | undefined>; save(data: T): Promise<void> } {
+  let snapshot: T | undefined;
+  const log = logger as unknown as { warn?: (o: unknown, m: string) => void };
+  const warn = (m: string, err: unknown) => (log.warn ? log.warn({ err }, m) : console.warn(m, err));
+  return {
+    ...(backend.describe ? { describe: backend.describe } : {}),
+    async load() {
+      try {
+        const data = await backend.load();
+        if (data !== undefined) snapshot = structuredClone(data);
+        return data;
+      } catch (err) {
+        if (snapshot === undefined) throw err;
+        warn("Postgres read failed (region unhealthy?); serving last-known state", err);
+        return structuredClone(snapshot);
+      }
+    },
+    async save(data) {
+      snapshot = structuredClone(data);
+      try {
+        await backend.save(data);
+      } catch (err) {
+        warn("Postgres write failed (region unhealthy?); state kept locally and will be retried", err);
+      }
+    },
+  };
+}

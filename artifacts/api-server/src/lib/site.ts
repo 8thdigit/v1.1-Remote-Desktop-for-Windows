@@ -141,10 +141,10 @@ export function fileSiteBackend(dir: string): SiteBackend {
 }
 
 export async function postgresSiteBackend(url: string): Promise<SiteBackend> {
-  const { createPgPool } = await import("./pgpool");
+  const { createPgPool, withPgFallback } = await import("./pgpool");
   const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore: SiteBackend = {
     describe: "PostgreSQL (DATABASE_URL)",
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'site'");
@@ -157,6 +157,7 @@ export async function postgresSiteBackend(url: string): Promise<SiteBackend> {
       );
     },
   };
+  return { describe: pgStore.describe, ...withPgFallback(pgStore) };
 }
 
 export function memorySiteBackend(initial?: SiteData): SiteBackend {

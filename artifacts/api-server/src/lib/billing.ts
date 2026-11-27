@@ -181,10 +181,10 @@ export function fileBillingBackend(dir: string): BillingBackend {
 // Stored as one row in the same msfwr_state table the accounts use, under a
 // different id, so no separate migration is needed.
 export async function postgresBillingBackend(url: string): Promise<BillingBackend> {
-  const { createPgPool } = await import("./pgpool");
+  const { createPgPool, withPgFallback } = await import("./pgpool");
   const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore: BillingBackend = {
     describe: "PostgreSQL (DATABASE_URL)",
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'billing'");
@@ -197,6 +197,7 @@ export async function postgresBillingBackend(url: string): Promise<BillingBacken
       );
     },
   };
+  return { describe: pgStore.describe, ...withPgFallback(pgStore) };
 }
 
 export function memoryBillingBackend(initial?: BillingData): BillingBackend {

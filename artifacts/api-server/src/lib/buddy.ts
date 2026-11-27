@@ -137,10 +137,10 @@ export function fileBuddyBackend(dir: string): BuddyBackend {
 }
 
 export async function postgresBuddyBackend(url: string): Promise<BuddyBackend> {
-  const { createPgPool } = await import("./pgpool");
+  const { createPgPool, withPgFallback } = await import("./pgpool");
   const pool = await createPgPool(url);
   await pool.query("CREATE TABLE IF NOT EXISTS msfwr_state (id text PRIMARY KEY, data jsonb NOT NULL)");
-  return {
+  const pgStore: BuddyBackend = {
     async load() {
       const r = await pool.query("SELECT data FROM msfwr_state WHERE id = 'buddy'");
       return r.rows[0]?.data as Data | undefined;
@@ -152,6 +152,7 @@ export async function postgresBuddyBackend(url: string): Promise<BuddyBackend> {
       );
     },
   };
+  return withPgFallback(pgStore);
 }
 
 export function memoryBuddyBackend(): BuddyBackend {
